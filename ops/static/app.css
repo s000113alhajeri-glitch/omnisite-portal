@@ -192,3 +192,6 @@ table.rec td{padding:10px 6px;border-bottom:1px solid var(--line);vertical-align
 .fsel{min-height:0;margin:0 0 14px;padding:8px 10px;font-size:13px}
 @media (max-width:980px){.side .fsel{width:auto;margin:0 8px 0 0;flex:none;max-width:140px}}
 .li .lo{background:none;border:0;padding:0;text-decoration:underline;color:var(--mute);cursor:pointer;font:inherit;font-size:12px}
+.pvbar{display:flex;justify-content:center;align-items:center;gap:12px;flex-wrap:wrap;background:#111;color:#fff;font-size:13px;padding:8px 14px;position:sticky;top:0;z-index:20}.pvbar .lo{background:none;border:0;padding:0;color:#fff;text-decoration:underline;cursor:pointer;font:inherit}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+@media (max-width:980px){.side:has(select[aria-label="View as"]){flex-wrap:wrap;row-gap:8px}.side:has(select[aria-label="View as"]) .nav{flex-basis:100%}}
