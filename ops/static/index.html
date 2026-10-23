@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light"><meta name="robots" content="noindex">
+<title>OmniSite · Operations</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<div id="root"><div class="boot">Loading…</div></div>
+<div id="dw">
+  <div class="scrim" id="scrim"></div>
+  <aside class="drawer" role="dialog" aria-modal="true" aria-labelledby="dTitle">
+    <div class="dh">
+      <div class="l"><span id="dIcon"></span><div><div class="muted" id="dKicker" style="font-size:12px"></div><h3 id="dTitle"></h3></div></div>
+      <button class="x" id="dClose" aria-label="Close">×</button>
+    </div>
+    <div class="db" id="dBody"></div>
+  </aside>
+</div>
+<div class="toast" id="toast" role="status" aria-live="polite"><span id="toastMsg"></span></div>
+<script src="/app.js"></script>
+</body>
+</html>

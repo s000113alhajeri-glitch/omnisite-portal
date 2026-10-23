@@ -1,3 +1,4 @@
 crm/data/
 __pycache__/
 *.pyc
+ops/data/
