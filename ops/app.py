@@ -385,7 +385,8 @@ def factory_api(c, method, path, body, user, fid, role):
         need(reason != "Other" or note, 'Add a short note for "Other".')
         day = body.get("day")
         start, end = at_time(body.get("start"), "the stop time", day), at_time(body.get("end"), "the restart time", day)
-        if end <= start:  # e.g. 23:50 → 00:20 ends the next day
+        need(end != start, "The restart time must be different from the stop time.")
+        if end < start:  # e.g. 23:50 → 00:20 ends the next day
             end = (dt.datetime.fromisoformat(end) + dt.timedelta(days=1)).isoformat(timespec="seconds")
             need(end <= now(), "The restart time can't be in the future.")
         need(end > start, "The restart time must be after the stop time.")

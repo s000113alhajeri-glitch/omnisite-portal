@@ -93,6 +93,7 @@ class Journey(unittest.TestCase):
         y = (app.uae_now().date() - app.dt.timedelta(days=1)).isoformat()
         self.post("/api/stops", {"equipment_id": mixer, "day": y, "start": "09:00", "end": "09:40", "reason": "Cleaning"})
         self.post("/api/stops", {"equipment_id": mixer, "day": y, "start": "23:50", "end": "00:20", "reason": "Cleaning"})  # overnight
+        self.post("/api/stops", {"equipment_id": mixer, "day": y, "start": "10:00", "end": "10:00", "reason": "Cleaning"}, code=400)
         night = [s for s in self.state()["stops"] if s["day"] == y and s["reason"] == "Cleaning" and s["started_at"] > s["ended_at"][:10]]
         self.assertTrue(any(app.dt.datetime.fromisoformat(s["ended_at"]) - app.dt.datetime.fromisoformat(s["started_at"]) == app.dt.timedelta(minutes=30) for s in night))
         self.post("/api/stops", {"equipment_id": mixer, "day": "2020-01-01", "start": "09:00", "end": "09:40", "reason": "Cleaning"}, code=400)

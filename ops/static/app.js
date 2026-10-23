@@ -133,7 +133,8 @@ function week() {
   stops.forEach(s => { const k = s.reason || "Reason not entered"; reasons[k] = (reasons[k] || 0) + sm(s); });
   const causes = {};
   S.d.qc.filter(q => q.result === "remix" && set.has(dayOf(q.at))).forEach(q => { const k = `${q.cause_what} ${q.cause_dir.toLowerCase()}`; causes[k] = (causes[k] || 0) + 1; });
-  const perDay = days.map(day => ({day, m: stops.filter(s => dayOf(from(s)) === day).reduce((a, s) => a + sm(s), 0)}));
+  const perDay = days.map(day => { const ds = new Date(day + "T00:00:00+04:00").getTime(), de = ds + 864e5;
+    return {day, m: stops.reduce((a, s) => { const st = Math.max(new Date(s.started_at).getTime(), ds), en = Math.min(s.ended_at ? new Date(s.ended_at).getTime() : Date.now(), de); return a + Math.max(0, Math.round((en - st) / 6e4)); }, 0)}; });
   const losses = S.d.losses.filter(l => set.has(l.day)), lossKg = losses.reduce((a, l) => a + l.kg, 0);
   const lab = S.d.labour.filter(l => set.has(l.day)), labH = lab.reduce((a, l) => a + l.hours, 0);
   const n = [0, 0, 0]; fin.forEach(b => n[cls(b)]++);
