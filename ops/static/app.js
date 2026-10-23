@@ -439,7 +439,7 @@ function drawer(k) {
   }
   if (kind === "day") {
     const day = id, list = S.d.stops.filter(s => dayOf(s.started_at) === day || dayMins(s, day) > 0), tot = list.reduce((a, s) => a + dayMins(s, day), 0);
-    let body = `<div class="big">${mins(tot)} <small>stopped</small></div>` + (list.length ? `<h4>Stops</h4>` + rows(list.map(s => [`${h(eq(s.equipment_id).name)} · ${hm(s.started_at)}${s.ended_at ? `–${hm(s.ended_at)}` : " · still stopped"}`, s.reason ? h(s.reason) : `<span class="st"><span class="dot r"></span>Reason needed</span>`, manual(mins(minsBetween(s.started_at, s.ended_at))), ic(eq(s.equipment_id).kind, s.ended_at ? null : "r", {size: "sm"}), `stop:${s.id}`])) : empty("No stops recorded on this day."));
+    let body = `<div class="big">${mins(tot)} <small>stopped</small></div>` + (list.length ? `<h4>Stops</h4>` + rows(list.map(s => [`${h(eq(s.equipment_id).name)} · ${hm(s.started_at)}${s.ended_at ? `–${hm(s.ended_at)}` : " · still stopped"}`, s.reason ? h(s.reason) : `<span class="st"><span class="dot r"></span>Reason needed</span>`, manual(dayMins(s, day) === minsBetween(s.started_at, s.ended_at) ? mins(dayMins(s, day)) : `${mins(dayMins(s, day))} on this day · ${mins(minsBetween(s.started_at, s.ended_at))} in total`), ic(eq(s.equipment_id).kind, s.ended_at ? null : "r", {size: "sm"}), `stop:${s.id}`])) : empty("No stops recorded on this day."));
     let after;
     if (!ro && S.d.equipment.length) { body += stopForm("fPast", `Add a stop on ${day === S.d.today ? "today" : dm(day)}`); after = () => bindStop("fPast", day); }
     return {icon: ic("motor"), kicker: "Downtime", title: day === S.d.today ? "Today" : dm(day), body, after};
