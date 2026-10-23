@@ -55,17 +55,18 @@ class Journey(unittest.TestCase):
         st = self.state()
         self.assertEqual((st["equipment"], st["batches"], st["stops"], st["settings"]), ([], [], [], {}))  # starts empty
         self.assertIn("View only", self.post("/api/equipment", {"name": "Mixer 1", "kind": "mixer"}, self.o, 403)["error"])
+        self.assertIn("OmniSite", self.post("/api/equipment", {"name": "Mixer 1", "kind": "mixer"}, self.m, 403)["error"])  # pilot equipment is set by OmniSite
 
-        self.post("/api/equipment", {"name": "Mixer 1", "kind": "mixer"})
-        self.post("/api/equipment", {"name": "mixer 1", "kind": "mixer"}, code=409)
-        self.post("/api/equipment", {"name": "Holding tank", "kind": "tank"})
+        self.post("/api/equipment", {"name": "Mixer 1", "kind": "mixer"}, self.a)
+        self.post("/api/equipment", {"name": "mixer 1", "kind": "mixer"}, self.a, code=409)
+        self.post("/api/equipment", {"name": "Holding tank", "kind": "tank"}, self.a)
         self.post("/api/settings", {"target_batches": "abc"}, code=400)
         self.post("/api/settings", {"target_batches": "5", "price_kg": "5"})
         mixer = self.state()["equipment"][0]["id"]
 
-        code = self.post("/api/batches", {"equipment_id": mixer})["code"]
+        code = self.post("/api/batches", {"equipment_id": mixer}, self.a)["code"]
         self.assertRegex(code, r"^MX1-\d{8}-01$")
-        self.post("/api/batches", {"equipment_id": mixer}, code=409)  # one batch per mixer
+        self.post("/api/batches", {"equipment_id": mixer}, self.a, code=409)  # one batch per mixer
         b = self.state()["batches"][0]["id"]
         self.post(f"/api/batches/{b}/move", {}, code=409)  # can't move before QC
         self.post(f"/api/batches/{b}/qc", {"ph": 15, "visc": 2400, "result": "pass"}, code=400)
@@ -78,15 +79,15 @@ class Journey(unittest.TestCase):
         bb = self.state()["batches"][0]
         self.assertEqual((bb["status"], bb["qc_count"]), ("moved", 2))
 
-        self.post(f"/api/equipment/{mixer}/status", {"status": "stopped"})
+        self.post(f"/api/equipment/{mixer}/status", {"status": "stopped"}, self.a)
         stop = self.state()["stops"][0]
         self.assertIsNone(stop["ended_at"])
         self.post(f"/api/stops/{stop['id']}", {"reason": "Other"}, code=400)
         self.post(f"/api/stops/{stop['id']}", {"reason": "Drive fault", "note": "called maintenance"})
         self.post(f"/api/stops/{stop['id']}", {"reason": "Drive fault"}, self.o, 403)
-        self.post("/api/batches", {"equipment_id": mixer}, code=409)  # can't start a batch on a stopped mixer
-        self.post(f"/api/equipment/{mixer}/status", {"status": "running"}, code=409)  # running needs a batch
-        self.post(f"/api/equipment/{mixer}/status", {"status": "idle"})
+        self.post("/api/batches", {"equipment_id": mixer}, self.a, code=409)  # can't start a batch on a stopped mixer
+        self.post(f"/api/equipment/{mixer}/status", {"status": "running"}, self.a, code=409)  # running needs a batch
+        self.post(f"/api/equipment/{mixer}/status", {"status": "idle"}, self.a)
         stop = self.state()["stops"][0]
         self.assertEqual((stop["reason"], bool(stop["ended_at"])), ("Drive fault", True))
         self.post("/api/stops", {"equipment_id": mixer, "start": "00:00", "end": "00:00", "reason": "Cleaning"}, code=400)
@@ -130,7 +131,8 @@ class Journey(unittest.TestCase):
         B = f"/api/f/{self.fb}"
         self.assertEqual(call("GET", B + "/state", None, self.m)[0], 404)  # manager A can't see factory B
         self.assertEqual(call("POST", B + "/equipment", {"name": "M", "kind": "mixer"}, self.m)[0], 404)
-        call("POST", B + "/equipment", {"name": "Mixer 1", "kind": "mixer"}, self.mb)
+        self.assertEqual(call("POST", B + "/equipment", {"name": "Mixer 1", "kind": "mixer"}, self.mb)[0], 403)
+        call("POST", B + "/equipment", {"name": "Mixer 1", "kind": "mixer"}, self.a)
         self.assertEqual([e["name"] for e in call("GET", B + "/state", None, self.o)[1]["equipment"]], ["Mixer 1"])
         me = call("GET", "/api/me", None, self.o)[1]["user"]
         self.assertEqual(sorted(f["role"] for f in me["factories"]), ["owner", "owner"])  # one owner, two factories
@@ -190,7 +192,8 @@ class Gateway(unittest.TestCase):
         m = login("sm@x.ae")
         F = f"/api/f/{fid}"
         P = lambda path, body, who=a, code=200: self.assertEqual(call("POST", F + path, body, who)[0], code) or call("GET", F + "/state", None, who)[1]
-        P("/equipment", {"name": "Mixer 1", "kind": "mixer"}, m)
+        P("/equipment", {"name": "Mixer 1", "kind": "mixer"}, m, 403)
+        P("/equipment", {"name": "Mixer 1", "kind": "mixer"})
         eid = call("GET", F + "/state", None, m)[1]["equipment"][0]["id"]
         self.assertEqual(call("GET", F + "/connections", None, m)[0], 403)  # OmniSite team only
         self.assertEqual(call("POST", F + "/gateways", {"name": "GW"}, m)[0], 403)
@@ -205,7 +208,9 @@ class Gateway(unittest.TestCase):
         self.assertEqual((s, d["saved"], d["unknown_tags"]), (200, 1, ["nope"]))
         st = call("GET", F + "/state", None, m)[1]
         self.assertEqual((st["stops"], st["equipment"][0]["status"], st["equipment"][0]["status_src"]), ([], "idle", "sensor"))
-        P("/batches", {"equipment_id": eid}, m)
+        P("/batches", {"equipment_id": eid}, m, 403)
+        P(f"/equipment/{eid}/status", {"status": "stopped"}, m, 403)
+        P("/batches", {"equipment_id": eid})
         t0 = int(app.dt.datetime.now(app.dt.timezone.utc).timestamp()) + 1
         s, d = ingest(key, {"readings": [{"tag": "m1_hz", "value": 5000, "at": t0}, {"tag": "scale_kg", "value": 400, "at": t0 + 1},
                                          {"tag": "m1_temp", "value": 41.5, "at": t0 + 2}, {"tag": "m1_wh", "value": 1000, "at": t0 + 3}]})

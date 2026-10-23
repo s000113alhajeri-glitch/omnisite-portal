@@ -123,7 +123,7 @@ function eqState(e) {
   if (e.kind === "mixer" && b) return b.status === "passed" ? {st: "a", label: "Waiting to move", spin: false} : {st: "g", label: b.status === "remix" ? "Running · re-mixing" : "Running", spin: true};
   if (e.status === "running") return {st: "g", label: "Running", spin: e.kind === "mixer"};
   if (e.status === "idle") return {st: "n", label: "Idle", spin: false};
-  return {st: "n", label: "Status not entered", spin: false};
+  return {st: "n", label: "Not connected yet", spin: false};
 }
 function today() {
   const t = S.d.today, done = S.d.batches.filter(b => b.status === "moved" && dayOf(b.moved_at) === t);
@@ -269,8 +269,8 @@ async function loadConn() { S.conn = await api("GET", "/api/connections"); rende
 function setupCard() {
   return `<section class="card c6 setup"><div class="ch"><span class="ct">${ic("mixer", null, {size: "lg"})}<span style="font-size:18px;font-weight:600;color:var(--ink)">Set up ${setv("factory_name") ? h(fname()) : "your factory"}</span></span></div>
    <div class="muted">Nothing is recorded yet. Start with these steps:</div>
-   <ol><li>Add your equipment (e.g. Mixer 1, Holding tank) <span class="req">*</span></li><li>Set the daily target and prices <span class="opt">(needed for targets and AED values)</span></li><li>Start a batch on a mixer</li></ol>
-   <div class="btns"><button class="btn" type="button" data-open="addEq">Add equipment</button><button class="btn ghost" type="button" data-open="settings">Target and prices</button></div></section>`;
+   <ol><li>${role() === "admin" ? `Add the pilot equipment from the approved site survey <span class="req">*</span>` : "Waiting for OmniSite to set up the pilot equipment"}</li><li>Set the daily target and prices <span class="opt">(needed for targets and AED values)</span></li><li>Record each batch as it runs</li></ol>
+   <div class="btns">${role() === "admin" ? `<button class="btn" type="button" data-open="addEq">Add equipment</button>` : ""}<button class="btn ghost" type="button" data-open="settings">Target and prices</button></div></section>`;
 }
 function railHtml() {
   const al = alerts(), ac = actions();
@@ -323,9 +323,10 @@ function vBatches() {
     ${t.target !== null ? `<div class="bar"><b style="width:${Math.min(100, t.done / t.target * 100)}%"></b></div>` : `<div class="why" style="margin-top:10px">Daily target not set. Tap to set it.</div>`}
     <div class="row"><span class="muted">${t.litres !== null ? `${fmt(t.done * t.litres)} L${t.target !== null ? ` of ${fmt(t.target * t.litres)} L` : ""}` : "Litres per batch not set"}</span></div>
     <div class="src"><i>✎</i>Manual · a batch counts when it is marked moved to the holding tank</div></section>`;
-  const startCard = idle.length || !act.length ? `<section class="card c3"><div class="ch"><span class="ct">${ic("mixer", "n")}Start a batch</span></div>
-    ${mixers().length ? (idle.length ? `<div class="muted">The batch number is made automatically.</div><div class="btns">${idle.map(e => `<button class="btn" type="button" data-open="start:${e.id}">Start on ${h(e.name)}</button>`).join("")}</div>` : `<div class="muted">All mixers have a batch in progress.</div>`)
-      : `<div class="muted">Add a mixer first.</div><div class="btns"><button class="btn" type="button" data-open="addEq">Add equipment</button></div>`}</section>` : "";
+  const startCard = `<section class="card c3"><div class="ch"><span class="ct">${ic("mixer", "n")}Mixers now</span></div>
+    ${mixers().length ? rows(mixers().map(e => { const s = eqState(e); return [`<b style="font-weight:600">${h(e.name)}</b>`, stLine(s.st, s.label), "", ic(e.kind, s.st, {spin: s.spin, size: "sm"}), `eq:${e.id}`]; }))
+      + (role() === "admin" && idle.length ? `<div class="btns">${idle.map(e => `<button class="btn ghost" type="button" data-open="start:${e.id}">OmniSite: record a batch on ${h(e.name)}</button>`).join("")}</div>` : "")
+      : (role() === "admin" ? `<div class="muted">Add a mixer first.</div><div class="btns"><button class="btn" type="button" data-open="addEq">Add equipment</button></div>` : `<div class="muted">Waiting for OmniSite to set up the pilot equipment.</div>`)}</section>`;
   const recent = S.d.batches.filter(b => !["mixing", "remix", "passed"].includes(b.status)).slice(0, 30);
   return prodCard + act.map(batchCard).join("") + startCard +
    `<section class="card c3" tabindex="0"><div class="ch"><span class="ct">${ic("qc")}Batches finished · last 7 days</span></div>${dailyChart(w.daily)}${LEGEND}<div class="src"><i>✎</i>Manual · QC results</div></section>
@@ -371,9 +372,9 @@ function vCosts() {
     <div class="why" style="margin-top:10px">Totals only include values that are recorded.</div></section>`;
 }
 function vEquipment() {
-  return `<section class="card c6 eq"><div class="ch"><span class="ct">Equipment</span><button class="btn ghost" type="button" data-open="addEq">Add equipment</button></div>
-    ${S.d.equipment.length ? rows(S.d.equipment.map(e => { const s = eqState(e); return [`<b style="font-weight:600">${h(e.name)}</b> <span class="muted">· ${h(S.meta.kinds[e.kind])}</span>`, stLine(s.st, s.label), e.status_at ? (e.status_src === "sensor" ? sensor : manual)(when(e.status_at)) : `<div class="why">Status not entered yet</div>`, ic(e.kind, s.st, {spin: s.spin}), `eq:${e.id}`]; }))
-      : empty("No equipment yet. Add each mixer and tank you want to follow.")}
+  return `<section class="card c6 eq"><div class="ch"><span class="ct">Equipment</span>${role() === "admin" ? `<button class="btn ghost" type="button" data-open="addEq">Add equipment</button>` : `<span class="muted" style="font-size:12px">Set by OmniSite for the pilot</span>`}</div>
+    ${S.d.equipment.length ? rows(S.d.equipment.map(e => { const s = eqState(e); return [`<b style="font-weight:600">${h(e.name)}</b> <span class="muted">· ${h(S.meta.kinds[e.kind])}</span>`, stLine(s.st, s.label), e.status_at ? (e.status_src === "sensor" ? sensor : manual)(when(e.status_at)) : `<div class="why">Needs connection</div>`, ic(e.kind, s.st, {spin: s.spin}), `eq:${e.id}`]; }))
+      : empty(role() === "admin" ? "No equipment yet. Add each mixer and tank from the approved site survey." : "Waiting for OmniSite to set up the pilot equipment.")}
     <div class="why" style="margin-top:12px">${(S.d.signals || []).length ? `Signals: ${S.d.signals.length} · Gateway ${(S.d.gateways || []).some(g => !quiet(g)) ? "online" : "not sending data"}. Equipment without a signal is entered by the site manager.` : "No sensors are connected yet, so status is entered by the site manager."}</div></section>
    <section class="card c6" data-open="settings" tabindex="0" role="button"><div class="ch"><span class="ct">${ic("coins")}Target and prices</span><span class="open">Edit ›</span></div>
     ${rows(Object.entries(S.meta.settings).map(([k, label]) => [label, setv(k) !== null ? h(setv(k)) : `<span class="nr">Not set</span>`, S.d.settings[k] ? manual(when(S.d.settings[k].at)) : ""]))}</section>`;
@@ -489,7 +490,7 @@ function drawer(k) {
     if (!ro) {
       body += form("fStop", s.reason ? "Change the reason" : "Add the stop reason", "Shown to the owner in “Why equipment stopped”.",
         fl(1, "Reason", 1) + chips("reason", pairs(S.meta.stop_reasons), s.reason) + fl(2, "Note", 0, '(required if "Other")') + `<textarea class="inp" name="note" placeholder="e.g. maintenance called at 11:25">${h(s.note)}</textarea>`, "Save reason");
-      if (!s.ended_at) body += `<div class="btns"><button class="btn ghost" type="button" data-act="restart:${e.id}">${e.kind === "mixer" && activeBatch(e.id) ? "Mark running again" : "Mark restarted (idle)"}</button></div>`;
+      if (!s.ended_at && role() === "admin") body += `<div class="btns"><button class="btn ghost" type="button" data-act="restart:${e.id}">${e.kind === "mixer" && activeBatch(e.id) ? "Mark running again" : "Mark restarted (idle)"}</button></div>`;
       after = () => bind("fStop", f => { need(val(f, "reason"), "Pick a reason."); need(val(f, "reason") !== "Other" || val(f, "note"), 'Add a short note for "Other".'); return {reason: val(f, "reason"), note: val(f, "note")}; }, `/api/stops/${s.id}`, "Stop reason saved");
     }
     return {icon: ic(e.kind, s.ended_at ? "n" : "r"), kicker: `Stop · ${e.name}`, title: s.ended_at ? `${e.name} stop` : `${e.name} stopped`, body, after};
@@ -499,7 +500,7 @@ function drawer(k) {
     const es = (S.d.signals || []).filter(x => x.equipment_id === e.id);
     let body = `${stLine(s.st, s.label)}${e.status_at ? `<div>${e.status_src === "sensor" ? sensor(when(e.status_at)) : manual(when(e.status_at))}</div>` : ""}<h4>Sensor readings</h4>${es.length ? rows(es.map(x => [h(S.meta.metrics[x.metric].label), sigVal(x), x.last_at ? sensor(when(x.last_at)) : ""])) : rows([["Run / stop signal", needsConn("Status is entered by hand until a sensor is connected"), ""]])}`;
     if (b) body += `<h4>Batch</h4>${rows([[h(b.code), "Open ›", "", "", `batch:${b.id}`]])}`;
-    if (!ro) {
+    if (!ro && role() === "admin") {
       const btn = (st, l, ghost) => `<button class="btn ${ghost ? "ghost" : ""}" type="button" data-act="status:${e.id}:${st}">${l}</button>`;
       body += `<h4>Change status</h4><div class="btns">${openStop(e.id) ? btn(b && b.status !== "passed" ? "running" : "idle", b && b.status !== "passed" ? "Running again" : "Restarted (idle)") : btn("stopped", "Mark stopped")}${!openStop(e.id) && e.kind !== "mixer" ? btn("running", "Running", 1) + btn("idle", "Idle", 1) : ""}</div>`;
       if (e.kind === "mixer" && !b) body += `<div class="btns"><button class="btn ghost" type="button" data-open="start:${e.id}">Start a batch on ${h(e.name)}</button></div>`;
@@ -562,7 +563,7 @@ function drawer(k) {
   if (kind === "addStop") return {icon: ic("motor"), kicker: "Downtime", title: "Add a past stop", body: stopForm("fPast", "Add a stop from earlier today"), after: () => bindStop("fPast", S.d.today, closeD)};
   return null;
 }
-const stopForm = (id, title) => form(id, title, "For a stop happening now, use “Mark stopped” on the equipment.",
+const stopForm = (id, title) => form(id, title, "Add the stop and restart times and the reason, for clarification.",
   fl(1, "Equipment", 1) + chips("equipment_id", S.d.equipment.map(e => [String(e.id), e.name])) + fl(2, "Stopped at (HH:MM)", 1) + `<input class="inp" name="start" placeholder="e.g. 09:30" inputmode="numeric">` + fl(3, "Restarted at (HH:MM)", 1) + `<input class="inp" name="end" placeholder="e.g. 09:50" inputmode="numeric">` +
   fl(4, "Reason", 1) + chips("reason", pairs(S.meta.stop_reasons)) + fl(5, "Note", 0, '(required if "Other")') + `<textarea class="inp" name="note"></textarea>`, "Save stop");
 const bindStop = (id, day, then) => bind(id, f => { need(val(f, "equipment_id"), "Pick the equipment."); need(/^\d{1,2}:\d{2}$/.test(val(f, "start")), "Enter the stop time as HH:MM."); need(/^\d{1,2}:\d{2}$/.test(val(f, "end")), "Enter the restart time as HH:MM."); need(val(f, "reason"), "Pick a reason."); need(val(f, "reason") !== "Other" || val(f, "note"), 'Add a short note for "Other".');

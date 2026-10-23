@@ -526,6 +526,7 @@ def factory_api(c, method, path, body, user, fid, role):
         return {"ok": True}
 
     if path == "/api/equipment":
+        need(role == "admin", "Pilot equipment is set by the OmniSite team from the approved site survey.", 403)
         name, kind = text(body.get("name"), 60), body.get("kind")
         need(name, "Enter a name, e.g. Mixer 1.")
         need(kind in KINDS, "Pick the type of equipment.")
@@ -537,6 +538,7 @@ def factory_api(c, method, path, body, user, fid, role):
 
     m = re.fullmatch(r"/api/equipment/(\d+)/status", path)
     if m:
+        need(role == "admin", "View only. The site manager adds notes and reasons; OmniSite never switches equipment on or off.", 403)
         e = get(c, "equipment", int(m.group(1)), "equipment", fid)
         st = body.get("status")
         need(st in ("running", "idle", "stopped"), "Pick running, idle or stopped.")
@@ -552,6 +554,7 @@ def factory_api(c, method, path, body, user, fid, role):
         return {"ok": True}
 
     if path == "/api/batches":
+        need(role == "admin", "View only. The site manager adds notes and reasons; batches are not started from here.", 403)
         e = get(c, "equipment", int(body.get("equipment_id") or 0), "mixer", fid)
         need(e["kind"] == "mixer", "Batches can only be started on a mixer.")
         busy = c.execute("SELECT code FROM batches WHERE equipment_id=? AND status IN ('mixing','remix','passed')", (e["id"],)).fetchone()
