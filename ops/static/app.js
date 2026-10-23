@@ -123,6 +123,8 @@ const mixers = () => S.d.equipment.filter(e => e.kind === "mixer");
 const openStop = eid => S.d.stops.find(s => s.equipment_id === eid && !s.ended_at);
 const activeBatch = eid => S.d.batches.find(b => b.equipment_id === eid && ["mixing", "remix", "passed"].includes(b.status));
 const qcOf = bid => S.d.qc.filter(q => q.batch_id === bid);
+const lastQc = b => qcOf(b.id).slice(-1)[0];
+const qcCells = b => { const q = lastQc(b); return q ? `<td>${fmt(q.ph, 2)}</td><td>${fmt(q.visc)} cP</td>` : `<td><span class="nr">Not recorded</span></td><td><span class="nr">Not recorded</span></td>`; };
 const finishedDay = b => b.status === "moved" ? dayOf(b.moved_at) : (b.status === "passed" || b.status === "rejected") && b.finished_at ? dayOf(b.finished_at) : null;
 function eqState(e) {
   if (openStop(e.id)) return {st: "r", label: "Stopped", spin: false};
@@ -243,14 +245,14 @@ function manager() {
   const nav = Object.keys(VIEWS).map(k => `<a href="#${k}" data-v="${k}" class="${k === v ? "on" : ""}" ${k === v ? 'aria-current="page"' : ""}><svg viewBox="0 0 24 24">${NAV_IC[k]}</svg><span>${k === "overview" ? "Overview" : VIEWS[k]}</span></a>`).join("");
   const body = !S.d.equipment.length && v !== "equipment" ? setupCard() : {overview: vOverview, batches: vBatches, downtime: vDowntime, costs: vCosts, equipment: vEquipment}[v]();
   const rail = v === "overview" && S.d.equipment.length ? railHtml() : "";
-  return shell(nav, VIEWS[v], body, rail, v === "overview" && S.d.equipment.length ? nowStrip() : "");
+  return shell(nav, VIEWS[v], body, rail);
 }
-function shell(nav, title, body, rail, pre = "") {
+function shell(nav, title, body, rail) {
   const who = S.user.admin ? "OmniSite team" : "Site manager";
   return `<div class="app"><aside class="side"><div class="brand">OmniSite<small>${[who, fname() && (!S.user.admin || title === "Connections") ? h(fname()) : ""].filter(Boolean).join(" · ")}</small></div>${switcher()}<nav class="nav">${nav}</nav>
    <div class="foot">${S.user.admin ? "" : `<button class="lo" type="button" data-open="support">Request support</button><br>`}${h(S.user.name)}<br><button class="lo" type="button" onclick="logout()">Log out</button></div></aside>
    <main>${pvBar()}<div class="top"><div><h1>${title}</h1><div class="sub">${nowLine()}</div></div><div><div class="mwho">${S.user.admin ? "" : `<button class="lo" type="button" data-open="support">Request support</button> · `}${h(S.user.name)} · <button class="lo" type="button" onclick="logout()">Log out</button></div>${S.user.admin ? "" : LEG()}</div></div>
-   ${pre}<div class="layout ${rail ? "" : "solo"}"><div class="grid">${body}</div>${rail}</div></main></div>`;
+   <div class="layout ${rail ? "" : "solo"}"><div class="grid">${body}</div>${rail}</div></main></div>`;
 }
 function vAdmin() {
   const A = S.admin; if (!A) return `<section class="card c6"><div class="muted">Loading…</div></section>`;
@@ -316,16 +318,6 @@ function railHtml() {
   return `<aside class="rail"><div><h2>Alerts <span class="count">${al.length}</span></h2>${al.map(alertCard).join("") || empty("No alerts. No equipment is stopped.")}</div>
    <div><h2>Needs action <span class="count">${ac.length}</span></h2>${ac.map(actCard).join("") || empty("Nothing needs action right now.")}</div></aside>`;
 }
-function nowStrip() {
-  const STEP = {mixing: "mixing", remix: "re-mixing", passed: "waiting to move to the holding tank"};
-  const tiles = S.d.equipment.map(e => { const s = eqState(e), b = activeBatch(e.id), st = openStop(e.id);
-    const what = st ? `${st.reason ? `Reason: ${h(st.reason)}` : `<span class="nr">Reason not entered yet</span>`}<div class="why">Stopped for <span data-since="${st.started_at}">${clock(nowMs() - new Date(st.started_at))}</span></div>`
-      : b ? `<span style="font-weight:600">${h(b.code)}</span> · ${STEP[b.status]}<div class="why">Since start <span data-since="${b.started_at}">${clock(nowMs() - new Date(b.started_at))}</span></div>`
-      : `<div class="why">${e.status_at ? "No batch on it now" : "Nothing received yet"}</div>`;
-    const src = st ? srcOf(st, when(st.started_at)) : e.status_at ? (e.status_src === "sensor" ? sensor : manual)(when(e.status_at)) : "";
-    return `<div class="mtile now ${s.st}" data-open="${st ? `stop:${st.id}` : `eq:${e.id}`}" tabindex="0" role="button">${ic(e.kind, s.st, {size: "lg", spin: s.spin})}<div style="min-width:0"><b>${h(e.name)}</b>${stLine(s.st, s.label)}<div style="margin-top:6px;font-size:13px">${what}</div>${src}</div></div>`; }).join("");
-  return `<section class="card c6 nowcard"><div class="ch"><span class="ct">${ic("bolt")}Now · ${hm(new Date().toISOString())}</span><span class="muted" style="font-size:12px">${!(S.d.signals || []).length ? "sensors not connected yet · from the site manager's entries" : (S.d.gateways || []).some(quiet) ? `<span style="color:var(--amber)">sensors not sending data · last ${when((S.d.gateways || []).map(g => g.last_seen).filter(Boolean).sort().pop() || "")}</span>` : "live from the sensors"}</span></div><div class="nowgrid">${tiles}</div></section>`;
-}
 function vOverview() {
   const t = today(), w = week(), m = money(w), go = '<span class="open">View details ›</span>';
   const act = S.d.batches.filter(b => ["mixing", "remix", "passed"].includes(b.status));
@@ -381,7 +373,7 @@ function vBatches() {
    `<section class="card c3" tabindex="0"><div class="ch"><span class="ct">${ic("qc")}Batches finished · last 7 days</span></div>${dailyChart(w.daily)}${LEGEND}<div class="src"><i>✎</i>Manual · QC results</div></section>
     <section class="card c3"><div class="ch"><span class="ct">${ic("rework")}Why batches were re-mixed · this week</span></div>${bars(w.causes, v => String(v))}<div class="src"><i>✎</i>Manual · causes entered at QC</div></section>
     <section class="card c6"><div class="ch"><span class="ct">${ic("tank")}Batch records · last 14 days</span></div>
-    ${recent.length ? `<table class="rec"><thead><tr><th>Batch</th><th>Mixer</th><th>Result</th><th class="hidem">Time to finish</th><th class="hidem">Material used</th><th>Finished</th></tr></thead><tbody>${recent.map(b => `<tr data-open="batch:${b.id}" tabindex="0"><td class="mono">${h(b.code)}</td><td>${h(eq(b.equipment_id).name)}</td><td>${b.status === "rejected" ? stLine("r", "Rejected") : b.qc_count > 1 ? stLine("a", `Re-mixed ×${b.qc_count - 1}`) : stLine("g", "Passed first time")}</td><td class="hidem">${b.finished_at ? mins(minsBetween(b.started_at, b.finished_at)) : "—"}</td><td class="hidem">${b.kg_used != null ? `${fmt(b.kg_used, 1)} kg` : `<span class="nr">Not recorded</span>`}</td><td>${b.moved_at ? when(b.moved_at) : b.finished_at ? when(b.finished_at) : "—"}</td></tr>`).join("")}</tbody></table>` : empty("No finished batches yet.")}
+    ${recent.length ? `<table class="rec"><thead><tr><th>Batch</th><th>Mixer</th><th>Result</th><th>pH</th><th>Viscosity</th><th class="hidem">Time to finish</th><th class="hidem">Material used</th><th>Finished</th></tr></thead><tbody>${recent.map(b => `<tr data-open="batch:${b.id}" tabindex="0"><td class="mono">${h(b.code)}</td><td>${h(eq(b.equipment_id).name)}</td><td>${b.status === "rejected" ? stLine("r", "Rejected") : b.qc_count > 1 ? stLine("a", `Re-mixed ×${b.qc_count - 1}`) : stLine("g", "Passed first time")}</td>${qcCells(b)}<td class="hidem">${b.finished_at ? mins(minsBetween(b.started_at, b.finished_at)) : "—"}</td><td class="hidem">${b.kg_used != null ? `${fmt(b.kg_used, 1)} kg` : `<span class="nr">Not recorded</span>`}</td><td>${b.moved_at ? when(b.moved_at) : b.finished_at ? when(b.finished_at) : "—"}</td></tr>`).join("")}</tbody></table>` : empty("No finished batches yet.")}
     <div class="src"><i>✎</i>Manual · QC entries</div></section>`;
 }
 function dayList(w) {
@@ -620,7 +612,7 @@ const bindStop = (id, day, then) => bind(id, f => { need(val(f, "equipment_id"),
   return {equipment_id: Number(val(f, "equipment_id")), day, start: val(f, "start"), end: val(f, "end"), reason: val(f, "reason"), note: val(f, "note")}; }, "/api/stops", "Stop saved", then);
 function oDrawer(k) {
   if (k !== "o-quality") return null; const w = week();
-  return {icon: ic("qc"), kicker: "This week", title: "Quality", body: w.fin.length ? rows(w.fin.map(b => [h(b.code), b.status === "rejected" ? "Rejected" : b.qc_count > 1 ? `Re-mixed ×${b.qc_count - 1}` : "Passed first time", manual(when(b.finished_at || b.moved_at))])) : empty("No finished batches this week.")};
+  return {icon: ic("qc"), kicker: "This week", title: "Quality", body: w.fin.length ? rows(w.fin.map(b => { const q = lastQc(b); return [h(b.code), b.status === "rejected" ? "Rejected" : b.qc_count > 1 ? `Re-mixed ×${b.qc_count - 1}` : "Passed first time", (q ? `pH ${fmt(q.ph, 2)} · Viscosity ${fmt(q.visc)} cP` : `<span class="nr">pH and viscosity not recorded</span>`) + manual(`last QC ${when(q ? q.at : b.finished_at || b.moved_at)}`)]; })) : empty("No finished batches this week.")};
 }
 
 function bindAdmin(id, build, path, msg) {
