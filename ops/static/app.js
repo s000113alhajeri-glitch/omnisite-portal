@@ -20,10 +20,21 @@ const stCls = {g: "g", a: "a", r: "r", n: "n"};
 function ic(name, st, opt = {}) { return `<span class="ic ${opt.size || ""} ${opt.spin ? "spin" : ""}" aria-hidden="true"><svg viewBox="0 0 24 24">${ICONS[name] || ICONS.other}</svg>${st ? `<span class="bd ${stCls[st]}"></span>` : ""}</span>`; }
 
 // ---------- state + api ----------
-const S = {user: null, meta: null, d: null, key: null, busy: false};
+const S = {user: null, meta: null, d: null, key: null, busy: false, fid: null, admin: null};
+const fac = () => (S.user.factories || []).find(f => f.id === S.fid);
+const role = () => (fac() || {}).role;
+const canEdit = () => ["admin", "manager"].includes(role());
+function pickFactory() {
+  const fs = S.user.factories || [], saved = Number(localStorage.getItem("omni_fid"));
+  S.fid = fs.some(f => f.id === saved) ? saved : fs.length ? fs[0].id : null;
+}
+function switchF(id) { S.fid = Number(id); localStorage.setItem("omni_fid", S.fid); closeD(); S.d = null; if (location.hash === "#admin") location.hash = "#overview"; load(); }
+const switcher = () => (S.user.factories || []).length > 1 ? `<select class="inp fsel" aria-label="Factory" onchange="switchF(this.value)">${S.user.factories.map(f => `<option value="${f.id}" ${f.id === S.fid ? "selected" : ""}>${h(f.name)}</option>`).join("")}</select>` : "";
 const $ = s => document.querySelector(s);
 const h = v => String(v ?? "").replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+const GLOBAL = /^\/api\/(login|logout|me|meta|admin)(\/|$)/;
 async function api(method, path, body) {
+  if (!GLOBAL.test(path)) path = `/api/f/${S.fid}` + path.slice(4);
   const opt = {method, headers: {}, credentials: "same-origin"};
   if (body !== undefined) { opt.body = JSON.stringify(body); opt.headers["Content-Type"] = "application/json"; }
   let r;
@@ -163,20 +174,36 @@ const NAV_IC = {
   overview: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
   batches: '<path d="M6 3h12M7 3v6l-3 9a2 2 0 0 0 2 3h12a2 2 0 0 0 2-3l-3-9V3"/>', downtime: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
   costs: '<path d="M4 19h16M7 16V9M12 16V5M17 16v-4"/>', equipment: '<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M5 19l2-2M17 7l2-2"/>'};
-const view = () => VIEWS[location.hash.slice(1)] ? location.hash.slice(1) : "overview";
+const view = () => location.hash === "#admin" && S.user.admin ? "admin" : VIEWS[location.hash.slice(1)] ? location.hash.slice(1) : "overview";
 const LEG = `<div class="legend"><span class="src" style="margin:0"><i>✎</i>Manual: entered by the site manager</span><span class="src" style="margin:0"><i>≈</i>Estimate: calculated from your prices</span><span class="src" style="margin:0"><i>●</i>Sensor: not connected yet</span></div>`;
-const fname = () => setv("factory_name") || "Your factory";
+const fname = () => S.d && S.d.factory ? S.d.factory.name : (fac() || {}).name || "";
 const nowLine = () => `${new Date().toLocaleDateString("en-GB", {weekday: "long", day: "numeric", month: "short", timeZone: TZ})} · Now ${hm(new Date().toISOString())}`;
 
 function manager() {
   const v = view();
-  const nav = Object.keys(VIEWS).map(k => `<a href="#${k}" data-v="${k}" class="${k === v ? "on" : ""}" ${k === v ? 'aria-current="page"' : ""}><svg viewBox="0 0 24 24">${NAV_IC[k]}</svg><span>${k === "overview" ? "Overview" : VIEWS[k]}</span></a>`).join("");
+  const nav = (S.fid ? Object.keys(VIEWS) : []).map(k => `<a href="#${k}" data-v="${k}" class="${k === v ? "on" : ""}" ${k === v ? 'aria-current="page"' : ""}><svg viewBox="0 0 24 24">${NAV_IC[k]}</svg><span>${k === "overview" ? "Overview" : VIEWS[k]}</span></a>`).join("") + (S.user.admin ? `<a href="#admin" class="${v === "admin" ? "on" : ""}"><svg viewBox="0 0 24 24"><path d="M4 21V9l5 3V9l5 3V5h6v16z"/></svg><span>Factories</span></a>` : "");
+  if (v === "admin") return shell(nav, "Factories", vAdmin(), "");
   const body = !S.d.equipment.length && v !== "equipment" ? setupCard() : {overview: vOverview, batches: vBatches, downtime: vDowntime, costs: vCosts, equipment: vEquipment}[v]();
   const rail = v === "overview" && S.d.equipment.length ? railHtml() : "";
-  return `<div class="app"><aside class="side"><div class="brand">OmniSite<small>Site manager · ${h(fname())}</small></div><nav class="nav">${nav}</nav>
+  return shell(nav, VIEWS[v], body, rail);
+}
+function shell(nav, title, body, rail) {
+  const who = S.user.admin ? "OmniSite team" : "Site manager";
+  return `<div class="app"><aside class="side"><div class="brand">OmniSite<small>${who}${fname() && title !== "Factories" ? ` · ${h(fname())}` : ""}</small></div>${switcher()}<nav class="nav">${nav}</nav>
    <div class="foot">${h(S.user.name)}<br><button class="lo" type="button" onclick="logout()">Log out</button></div></aside>
-   <main><div class="top"><div><h1>${VIEWS[v]}</h1><div class="sub">${nowLine()}</div></div><div><div class="mwho">${h(S.user.name)} · <button class="lo" type="button" onclick="logout()">Log out</button></div>${LEG}</div></div>
+   <main><div class="top"><div><h1>${title}</h1><div class="sub">${nowLine()}</div></div><div><div class="mwho">${h(S.user.name)} · <button class="lo" type="button" onclick="logout()">Log out</button></div>${title === "Factories" ? "" : LEG}</div></div>
    <div class="layout ${rail ? "" : "solo"}"><div class="grid">${body}</div>${rail}</div></main></div>`;
+}
+function vAdmin() {
+  const A = S.admin; if (!A) return `<section class="card c6"><div class="muted">Loading…</div></section>`;
+  const add = `<section class="card c6"><div class="ch"><span class="ct">${ic("other")}Factories · ${A.factories.length}</span><button class="btn" type="button" data-open="addFactory">Add factory</button></div>
+    <div class="why">Each factory has its own equipment, records and logins. Site managers and owners only see the factories they're added to. The OmniSite team sees all.</div></section>`;
+  const cards = A.factories.map(f => { const ppl = A.people.filter(p => p.factory_id === f.id);
+    return `<section class="card c3"><div class="ch"><span class="ct">${ic("mixer")}<b style="font-weight:600;color:var(--ink)">${h(f.name)}</b></span><button class="btn ghost" type="button" data-act="open:${f.id}">Open dashboards</button></div>
+      ${ppl.length ? rows(ppl.map(p => [`${h(p.name)}<div class="why">${h(p.email)}</div>`, `${p.role === "owner" ? "Owner · view only" : "Site manager"} <button class="lo" type="button" data-act="rm:${p.user_id}:${f.id}" aria-label="Remove ${h(p.name)}" style="margin-left:8px;font-weight:400">Remove</button>`, "", ic("person", null, {size: "sm"})])) : empty("No logins yet. Add the site manager and the owner.")}
+      <div class="btns"><button class="btn ghost" type="button" data-open="addPerson:${f.id}">Add person</button></div></section>`; }).join("");
+  const team = `<section class="card c6"><div class="ch"><span class="ct">${ic("person")}OmniSite team · sees all factories</span></div>${rows(A.team.map(u => [h(u.name), h(u.email), ""]))}<div class="why" style="margin-top:8px">Team logins are added by OmniSite on the server.</div></section>`;
+  return add + (cards || `<section class="card c6 setup"><div class="muted">No factories yet. Tap “Add factory” to add the first one.</div></section>`) + team;
 }
 function setupCard() {
   return `<section class="card c6 setup"><div class="ch"><span class="ct">${ic("mixer", null, {size: "lg"})}<span style="font-size:18px;font-weight:600;color:var(--ink)">Set up ${setv("factory_name") ? h(fname()) : "your factory"}</span></span></div>
@@ -250,7 +277,7 @@ function dayList(w) {
   const max = Math.max(1, ...w.perDay.map(d => d.m));
   return w.perDay.map(d => { const miss = S.d.stops.some(s => dayOf(s.started_at) === d.day && !s.reason);
       return `<div class="dayrow" data-open="day:${d.day}" tabindex="0" role="button"><div class="row" style="font-size:13px"><span>${d.day === S.d.today ? "Today" : dm(d.day)}${miss ? ` <span class="st" style="margin-left:6px"><span class="dot r"></span>Reason needed</span>` : ""}</span><b style="font-weight:600">${d.m ? mins(d.m) : "0 min"} <span class="muted" style="font-weight:400">›</span></b></div><div class="bar" style="margin:6px 0 0;height:6px"><b style="width:${d.m / max * 100}%"></b></div></div>`; }).join("")
-    + `<div class="why" style="margin-top:8px">Tap a day to see its stops${S.user.role === "manager" ? " or add one" : ""}.</div>`;
+    + `<div class="why" style="margin-top:8px">Tap a day to see its stops${canEdit() ? " or add one" : ""}.</div>`;
 }
 function vDowntime() {
   const w = week();
@@ -301,7 +328,7 @@ function owner() {
     return `<div class="mtile">${ic(e.kind, s.st, {size: "lg", spin: s.spin})}<div><b>${h(e.name)}</b>${stLine(s.st, s.label)}<div class="why" style="margin-top:4px">${b ? h(b.code) : openStop(e.id) ? `Stopped for ${mins(minsBetween(openStop(e.id).started_at))}` : ""}</div>${e.status_at ? manual(when(e.status_at)) : ""}</div></div>`; }).join("");
   const total = [m.mat, m.down].filter(v => v !== null).reduce((a, b) => a + b, 0), parts = [m.mat, m.down].filter(v => v !== null).length;
   const ft = w.fin.length ? Math.round(w.n[0] / w.fin.length * 100) : null;
-  return `<div class="owner"><div class="otop"><div><div class="obrand">OmniSite<small>Factory owner · ${h(fname())}</small></div><h1 style="margin-top:14px">Your factory today</h1><div class="sub">${nowLine()}</div></div>
+  return `<div class="owner"><div class="otop"><div><div class="obrand">OmniSite<small>Factory owner · ${h(fname())}</small></div>${switcher() ? `<div style="margin-top:10px;max-width:260px">${switcher()}</div>` : ""}<h1 style="margin-top:14px">Your factory today</h1><div class="sub">${nowLine()}</div></div>
    <div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px"><span class="ro">View only · the site manager enters reasons and readings</span><div class="muted" style="font-size:12px">${h(S.user.name)} · <button class="lo" type="button" onclick="logout()" style="background:none;border:0;padding:0;text-decoration:underline;cursor:pointer;font:inherit;color:var(--ink2)">Log out</button></div></div></div>
    <section class="card" style="margin-bottom:20px"><div class="hero"><div class="light"><span class="bulb ${light.c}"></span><div><div style="margin-bottom:4px">${stLine(light.c, light.label)}</div><h2>${light.line}</h2>${light.sub ? `<div class="muted" style="margin-top:6px">${light.sub}</div>` : ""}${light.src || ""}</div></div>${tiles}</div></section>
    <div class="grid">
@@ -347,7 +374,15 @@ function bind(id, build, path, msg, then) {
 const need = (c, m) => { if (!c) throw m; };
 function drawer(k) {
   if (k.startsWith("o-")) return oDrawer(k);
-  const [kind, id] = k.split(":"), n = Number(id), ro = S.user.role !== "manager";
+  const [kind, id] = k.split(":"), n = Number(id), ro = !canEdit();
+  if (kind === "addFactory" && S.user.admin) return {icon: ic("mixer"), kicker: "OmniSite team", title: "Add factory", body: form("fFac", "Add a factory", "It starts empty. Next, add its site manager and owner.", fl(1, "Factory name", 1) + `<input class="inp" name="name" placeholder="e.g. Chemex" style="min-height:0">`, "Add factory"),
+    after: () => bindAdmin("fFac", f => { need(val(f, "name"), "Enter the factory name."); return {name: val(f, "name")}; }, "/api/admin/factories", "Factory added")};
+  if (kind === "addPerson" && S.user.admin) { const f = S.admin.factories.find(x => x.id === n); if (!f) return null;
+    return {icon: ic("person"), kicker: h(f.name), title: "Add person", body: form("fPer", `Add a login for ${h(f.name)}`, "Give the person their email and password yourself. Nothing is sent automatically.",
+      fl(1, "Role", 1) + chips("role", [["manager", "Site manager (enters information)"], ["owner", "Owner (view only)"]]) + fl(2, "Name", 1) + `<input class="inp" name="name" style="min-height:0">` +
+      fl(3, "Email", 1) + `<input class="inp" name="email" type="email" autocomplete="off" style="min-height:0">` + fl(4, "Password", 0, "(at least 10 characters · leave empty if this email already has a login)") + `<input class="inp" name="password" type="text" autocomplete="off" style="min-height:0">`, "Add person"),
+      after: () => bindAdmin("fPer", x => { need(val(x, "role"), "Pick the role."); need(/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(val(x, "email")), "Enter a valid email."); const pw = val(x, "password"); need(!pw || pw.length >= 10, "The password needs at least 10 characters.");
+        return {factory_id: f.id, role: val(x, "role"), name: val(x, "name"), email: val(x, "email"), password: pw}; }, "/api/admin/people", "Person added")}; }
   if (kind === "batch") {
     const b = S.d.batches.find(x => x.id === n); if (!b) return null; const e = eq(b.equipment_id), q = qcOf(b.id), s = eqState(e);
     const ev = [[hm(b.started_at), "g", `Started on ${h(e.name)}`], ...q.map(x => [hm(x.at), x.result === "pass" ? "g" : x.result === "remix" ? "a" : "r", `QC: pH ${fmt(x.ph, 2)}, ${fmt(x.visc)} cP · ${x.result === "pass" ? "passed" : x.result === "remix" ? `re-mix (${h(x.cause_what)} ${h(x.cause_dir.toLowerCase())})` : "rejected"}${x.note ? ` · ${h(x.note)}` : ""}`]), ...(b.moved_at ? [[hm(b.moved_at), "g", "Moved to holding tank"]] : [])];
@@ -438,9 +473,23 @@ function oDrawer(k) {
   return {icon: ic("qc"), kicker: "This week", title: "Quality", body: w.fin.length ? rows(w.fin.map(b => [h(b.code), b.status === "rejected" ? "Rejected" : b.qc_count > 1 ? `Re-mixed ×${b.qc_count - 1}` : "Passed first time", manual(when(b.finished_at || b.moved_at))])) : empty("No finished batches this week.")};
 }
 
+function bindAdmin(id, build, path, msg) {
+  const f = document.getElementById(id); if (!f) return;
+  f.onsubmit = async e => { e.preventDefault(); const box = f.querySelector(".err"), b = f.querySelector("button.btn");
+    let body; try { body = build(f); } catch (m) { box.textContent = m; box.hidden = false; return; }
+    if (b.disabled) return; b.disabled = true; b.textContent = "Saving…"; box.hidden = true;
+    try { await api("POST", path, body); await refreshMe(); await loadAdmin(); toast(msg); closeD(); }
+    catch (er) { box.textContent = er.error; box.hidden = false; b.disabled = false; b.textContent = "Try again"; } };
+}
+async function refreshMe() { S.user = (await api("GET", "/api/me")).user; if (!S.fid) pickFactory(); }
+async function loadAdmin() { S.admin = await api("GET", "/api/admin"); render(); }
+
 // ---------- actions without a form ----------
 async function act(a) {
   const [k, id, st] = a.split(":");
+  if (k === "open") return switchF(id);
+  if (k === "rm") { if (S.busy || !confirm("Remove this person from the factory? Their login will no longer open it.")) return; S.busy = true;
+    try { await api("POST", "/api/admin/people/remove", {user_id: Number(id), factory_id: Number(st)}); await loadAdmin(); toast("Removed"); } catch (e) { toast(e.error); } finally { S.busy = false; } return; }
   const path = k === "move" ? `/api/batches/${id}/move` : `/api/equipment/${id}/status`;
   const body = k === "move" ? {} : {status: k === "restart" ? (activeBatch(Number(id)) && activeBatch(Number(id)).status !== "passed" ? "running" : "idle") : st};
   if (S.busy) return; S.busy = true;
@@ -457,19 +506,21 @@ function loginView() {
   const f = $("#fLogin");
   f.onsubmit = async e => { e.preventDefault(); const box = f.querySelector(".err"), b = f.querySelector("button");
     if (!val(f, "email") || !val(f, "password")) { box.textContent = "Enter your email and password."; box.hidden = false; return; }
-    b.disabled = true; try { const r = await api("POST", "/api/login", {email: val(f, "email"), password: f.password.value}); S.user = r.user; await load(); } catch (er) { box.textContent = er.error; box.hidden = false; b.disabled = false; } };
+    b.disabled = true; try { const r = await api("POST", "/api/login", {email: val(f, "email"), password: f.password.value}); S.user = r.user; pickFactory(); await load(); } catch (er) { box.textContent = er.error; box.hidden = false; b.disabled = false; } };
 }
 async function logout() { try { await api("POST", "/api/logout"); } catch (e) {} S.user = null; closeD(); render(); }
-async function reload() { S.d = await api("GET", "/api/state"); render(); }
+async function reload() { if (S.fid) S.d = await api("GET", "/api/state"); if (view() === "admin") S.admin = await api("GET", "/api/admin"); render(); }
 async function load() {
   try { if (!S.meta) S.meta = await api("GET", "/api/meta"); await reload(); }
   catch (e) { if (e.status === 401) return; $("#root").innerHTML = `<div class="login"><h1>Could not load</h1><p class="err">${h(e.error)}</p><button class="btn" onclick="load()">Try again</button></div>`; }
 }
 function render() {
   if (!S.user) return loginView();
-  if (!S.d) return;
-  $("#root").innerHTML = S.user.role === "manager" ? manager() : owner();
-  document.title = `OmniSite · ${S.user.role === "manager" ? VIEWS[view()] : "Owner"}`;
+  if (!S.d && S.fid && view() !== "admin") return;
+  if (!S.fid && !S.user.admin) { $("#root").innerHTML = `<div class="login"><div class="obrand">OmniSite</div><h1 style="margin-top:18px">No factory yet</h1><div class="sub">This login isn't linked to a factory yet. Ask OmniSite to add you.</div><div class="btns"><button class="btn ghost" type="button" onclick="logout()">Log out</button></div></div>`; return; }
+  if (!S.fid && view() !== "admin") { location.hash = "#admin"; return; }
+  $("#root").innerHTML = canEdit() || view() === "admin" ? manager() : owner();
+  document.title = `OmniSite · ${view() === "admin" ? "Factories" : canEdit() ? VIEWS[view()] : "Owner"}`;
 }
 document.addEventListener("click", e => {
   if (e.target.closest(".toast")) return;
@@ -485,7 +536,7 @@ document.addEventListener("keydown", e => {
   if (o) { e.preventDefault(); openD(o.dataset.open); } else if (g) { e.preventDefault(); location.hash = g.dataset.go; }
 });
 $("#scrim").onclick = closeD; $("#dClose").onclick = closeD;
-window.addEventListener("hashchange", () => { closeD(); render(); window.scrollTo(0, 0); });
+window.addEventListener("hashchange", () => { closeD(); if (view() === "admin") loadAdmin().catch(e => toast(e.error)); else render(); window.scrollTo(0, 0); });
 setInterval(() => document.querySelectorAll("[data-since]").forEach(el => el.textContent = clock(nowMs() - new Date(el.dataset.since))), 1000);
 setInterval(() => { if (S.user && S.d && !S.key && !document.hidden) reload().catch(() => {}); }, 30000);
-(async () => { try { S.user = (await api("GET", "/api/me")).user; } catch (e) { S.user = null; } S.user ? load() : render(); })();
+(async () => { try { S.user = (await api("GET", "/api/me")).user; pickFactory(); } catch (e) { S.user = null; } S.user ? load() : render(); })();

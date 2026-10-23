@@ -189,3 +189,6 @@ table.rec td{padding:10px 6px;border-bottom:1px solid var(--line);vertical-align
 @media (max-width:980px){.nav{overflow-x:auto;scrollbar-width:none;-webkit-overflow-scrolling:touch}.nav::-webkit-scrollbar{display:none}.sum{min-height:0}.mwho{display:block}.owner{padding:20px 16px 40px}.hero{grid-template-columns:1fr}}
 .dayrow{margin:4px -8px;padding:6px 8px;border-radius:9px;cursor:pointer}.dayrow:hover{background:var(--soft)}.dayrow:focus-visible{outline:2px solid var(--ink)}
 @media (max-width:640px){.top .legend{display:none}}
+.fsel{min-height:0;margin:0 0 14px;padding:8px 10px;font-size:13px}
+@media (max-width:980px){.side .fsel{width:auto;margin:0 8px 0 0;flex:none;max-width:140px}}
+.li .lo{background:none;border:0;padding:0;text-decoration:underline;color:var(--mute);cursor:pointer;font:inherit;font-size:12px}

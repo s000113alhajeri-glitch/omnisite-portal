@@ -30,20 +30,27 @@ class Journey(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         with app.db() as c:
-            for email, role in (("m@x.ae", "manager"), ("o@x.ae", "owner")):
-                c.execute("INSERT INTO users(email,name,role,pw,created_at) VALUES(?,?,?,?,?)", (email, role, role, app.hash_pw("correct horse 1"), app.now()))
-        cls.m, cls.o = login("m@x.ae"), login("o@x.ae")
+            c.execute("INSERT INTO users(email,name,is_admin,pw,created_at) VALUES(?,?,1,?,?)", ("a@omni.ae", "Admin", app.hash_pw("correct horse 1"), app.now()))
+        cls.a = login("a@omni.ae")
+        mk = lambda n: call("POST", "/api/admin/factories", {"name": n}, cls.a)[1]["id"]
+        cls.fa, cls.fb = mk("Factory A"), mk("Factory B")
+        add = lambda fid, email, role, name="X", pw="correct horse 1": call("POST", "/api/admin/people", {"factory_id": fid, "email": email, "role": role, "name": name, "password": pw}, cls.a)
+        add(cls.fa, "m@x.ae", "manager"); add(cls.fa, "m2@x.ae", "manager"); add(cls.fa, "o@x.ae", "owner")
+        assert add(cls.fb, "o@x.ae", "owner", pw="")[1]["existing"]  # same owner, 2nd factory, keeps password
+        add(cls.fb, "mb@x.ae", "manager")
+        cls.m, cls.o, cls.mb = login("m@x.ae"), login("o@x.ae"), login("mb@x.ae")
+        cls.F = f"/api/f/{cls.fa}"
 
     def post(self, path, body, who=None, code=200):
-        s, d, _ = call("POST", path, body, who or self.m)
+        s, d, _ = call("POST", self.F + path[4:], body, who or self.m)
         self.assertEqual(s, code, d)
         return d
 
     def state(self, who=None):
-        return call("GET", "/api/state", None, who or self.m)[1]
+        return call("GET", self.F + "/state", None, who or self.m)[1]
 
     def test_journey(self):
-        self.assertEqual(call("GET", "/api/state")[0], 401)
+        self.assertEqual(call("GET", self.F + "/state")[0], 401)
         self.assertEqual(call("POST", "/api/login", {"email": "m@x.ae", "password": "wrong"})[0], 401)
         st = self.state()
         self.assertEqual((st["equipment"], st["batches"], st["stops"], st["settings"]), ([], [], [], {}))  # starts empty
@@ -53,7 +60,7 @@ class Journey(unittest.TestCase):
         self.post("/api/equipment", {"name": "mixer 1", "kind": "mixer"}, code=409)
         self.post("/api/equipment", {"name": "Holding tank", "kind": "tank"})
         self.post("/api/settings", {"target_batches": "abc"}, code=400)
-        self.post("/api/settings", {"target_batches": "5", "price_kg": "5", "factory_name": "Test factory"})
+        self.post("/api/settings", {"target_batches": "5", "price_kg": "5"})
         mixer = self.state()["equipment"][0]["id"]
 
         code = self.post("/api/batches", {"equipment_id": mixer})["code"]
@@ -95,6 +102,23 @@ class Journey(unittest.TestCase):
         self.post("/api/labour", {"hours": 30})
         self.assertEqual([l["hours"] for l in self.state()["labour"]], [30])
         self.assertEqual(self.state(self.o)["batches"][0]["code"], code)  # owner sees the same records
+        self.assertEqual(self.state(self.a)["batches"][0]["code"], code)  # OmniSite team sees every factory
+        self.post("/api/labour", {"hours": 8}, self.a)  # and can enter for support
+
+    def test_isolation_and_admin(self):
+        B = f"/api/f/{self.fb}"
+        self.assertEqual(call("GET", B + "/state", None, self.m)[0], 404)  # manager A can't see factory B
+        self.assertEqual(call("POST", B + "/equipment", {"name": "M", "kind": "mixer"}, self.m)[0], 404)
+        call("POST", B + "/equipment", {"name": "Mixer 1", "kind": "mixer"}, self.mb)
+        self.assertEqual([e["name"] for e in call("GET", B + "/state", None, self.o)[1]["equipment"]], ["Mixer 1"])
+        me = call("GET", "/api/me", None, self.o)[1]["user"]
+        self.assertEqual(sorted(f["role"] for f in me["factories"]), ["owner", "owner"])  # one owner, two factories
+        self.assertEqual(call("GET", "/api/admin", None, self.m)[0], 403)
+        self.assertEqual(call("POST", "/api/admin/factories", {"name": "factory a"}, self.a)[0], 409)
+        self.assertEqual(call("POST", "/api/admin/people", {"factory_id": self.fa, "email": "new@x.ae", "role": "manager", "name": "N", "password": "short"}, self.a)[0], 400)
+        uid = [p for p in call("GET", "/api/admin", None, self.a)[1]["people"] if p["email"] == "mb@x.ae"][0]["user_id"]
+        call("POST", "/api/admin/people/remove", {"factory_id": self.fb, "user_id": uid}, self.a)
+        self.assertEqual(call("GET", B + "/state", None, self.mb)[0], 404)  # removed person loses access
 
 
 if __name__ == "__main__":
