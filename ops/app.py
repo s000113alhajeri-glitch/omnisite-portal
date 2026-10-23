@@ -10,6 +10,7 @@ import getpass
 import hashlib
 import hmac
 import json
+import math
 import mimetypes
 import os
 import re
@@ -27,7 +28,12 @@ UAE = dt.timezone(dt.timedelta(hours=4))
 ROLES = ("manager", "owner")  # per factory; OmniSite team users have users.is_admin = 1
 KINDS = {"mixer": "Mixer", "tank": "Holding tank", "scale": "Scale", "qc": "QC equipment",
          "pump": "Pump", "filler": "Filling machine", "gateway": "Gateway", "other": "Other"}
-STOP_REASONS = ["Drive fault", "Waiting for material", "Cleaning", "Planned maintenance", "Power cut", "Other"]
+STOP_REASONS = ["Drive fault", "Waiting for material", "Waiting for QC", "Cleaning", "Planned maintenance", "Power cut", "Other"]
+# what a gateway signal measures: (label, unit). Altivar 212 Modbus: speed FD00 (0.01 Hz), current FE03 (0.01 %), input energy FE76 (1 Wh), trip code FC90.
+METRICS = {"speed_hz": ("Drive speed", "Hz"), "current_pct": ("Motor current", "% of rated"), "energy_kwh": ("Energy", "kWh"),
+           "trip": ("Drive trip code", ""), "temp_c": ("Tank temperature", "°C"), "weigh_kg": ("Weighing on the scale", "kg")}
+RUNNING_HZ = 0.5  # drive speed above this counts as running
+QUIET_MIN = 10  # minutes without data before "Gateway not sending data"
 LOSS_TYPES = ["Re-mix top-up", "Tank residue", "Spillage", "Other"]
 # key: (label, min, max)
 SETTINGS = {
@@ -51,7 +57,8 @@ CREATE TABLE IF NOT EXISTS equipment(id INTEGER PRIMARY KEY, factory_id INTEGER 
   kind TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'unknown', status_at TEXT, created_at TEXT NOT NULL, UNIQUE(factory_id, name));
 CREATE TABLE IF NOT EXISTS batches(id INTEGER PRIMARY KEY, factory_id INTEGER NOT NULL REFERENCES factories(id), code TEXT NOT NULL,
   equipment_id INTEGER NOT NULL REFERENCES equipment(id), started_at TEXT NOT NULL, status TEXT NOT NULL,
-  qc_count INTEGER NOT NULL DEFAULT 0, finished_at TEXT, moved_at TEXT, user_id INTEGER, UNIQUE(factory_id, code));
+  qc_count INTEGER NOT NULL DEFAULT 0, finished_at TEXT, moved_at TEXT, user_id INTEGER, kg_used REAL, kg_at TEXT,
+  UNIQUE(factory_id, code));
 CREATE TABLE IF NOT EXISTS qc(id INTEGER PRIMARY KEY, batch_id INTEGER NOT NULL REFERENCES batches(id), at TEXT NOT NULL,
   ph REAL NOT NULL, visc REAL NOT NULL, result TEXT NOT NULL, cause_what TEXT DEFAULT '', cause_dir TEXT DEFAULT '',
   note TEXT DEFAULT '', user_id INTEGER);
@@ -62,9 +69,22 @@ CREATE TABLE IF NOT EXISTS losses(id INTEGER PRIMARY KEY, factory_id INTEGER NOT
   kg REAL NOT NULL, type TEXT NOT NULL, batch_id INTEGER REFERENCES batches(id), note TEXT DEFAULT '', user_id INTEGER,
   request_id TEXT UNIQUE);
 CREATE TABLE IF NOT EXISTS labour(factory_id INTEGER NOT NULL REFERENCES factories(id), day TEXT NOT NULL, hours REAL NOT NULL,
-  user_id INTEGER, updated_at TEXT NOT NULL, PRIMARY KEY(factory_id, day));
+  user_id INTEGER, updated_at TEXT NOT NULL, people INTEGER, hours_each REAL, PRIMARY KEY(factory_id, day));
+CREATE TABLE IF NOT EXISTS gateways(id INTEGER PRIMARY KEY, factory_id INTEGER NOT NULL REFERENCES factories(id), name TEXT NOT NULL,
+  key_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, last_seen TEXT, last_payload TEXT, last_unknown TEXT);
+CREATE TABLE IF NOT EXISTS signals(id INTEGER PRIMARY KEY, factory_id INTEGER NOT NULL REFERENCES factories(id),
+  equipment_id INTEGER NOT NULL REFERENCES equipment(id), metric TEXT NOT NULL, tag TEXT NOT NULL, mult REAL NOT NULL DEFAULT 1,
+  plus REAL NOT NULL DEFAULT 0, last_value REAL, last_at TEXT, created_at TEXT NOT NULL, UNIQUE(factory_id, tag), UNIQUE(equipment_id, metric));
+CREATE TABLE IF NOT EXISTS readings(id INTEGER PRIMARY KEY, factory_id INTEGER NOT NULL, signal_id INTEGER NOT NULL REFERENCES signals(id),
+  at TEXT NOT NULL, value REAL NOT NULL, UNIQUE(signal_id, at));
 CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY, factory_id INTEGER, at TEXT NOT NULL, user_id INTEGER,
   kind TEXT NOT NULL, text TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS readings_archive(id INTEGER PRIMARY KEY, factory_id INTEGER NOT NULL, equipment_id INTEGER, metric TEXT NOT NULL,
+  tag TEXT NOT NULL, at TEXT NOT NULL, value REAL NOT NULL, signal_removed_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS outages(id INTEGER PRIMARY KEY, factory_id INTEGER NOT NULL REFERENCES factories(id), kind TEXT NOT NULL,
+  ref_id INTEGER NOT NULL, started_at TEXT NOT NULL, ended_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS support(id INTEGER PRIMARY KEY, factory_id INTEGER NOT NULL REFERENCES factories(id), user_id INTEGER,
+  at TEXT NOT NULL, text TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open', resolved_at TEXT, resolved_by INTEGER);
 """
 
 
@@ -89,9 +109,18 @@ def db():
     return c
 
 
+ADDED_COLUMNS = {"batches": {"kg_used": "REAL", "kg_at": "TEXT"}, "labour": {"people": "INTEGER", "hours_each": "REAL"},
+                 "stops": {"source": "TEXT DEFAULT 'manual'", "reason_src": "TEXT DEFAULT ''"}, "equipment": {"status_src": "TEXT DEFAULT 'manual'"}}
+
+
 def init():
     with db() as c:
         c.executescript(SCHEMA)
+        for table, cols in ADDED_COLUMNS.items():  # databases created before these columns existed
+            have = {r["name"] for r in c.execute(f"PRAGMA table_info({table})")}
+            for col, typ in cols.items():
+                if col not in have:
+                    c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
 
 
 def hash_pw(pw, salt=None):
@@ -162,16 +191,16 @@ def get(c, table, rid, what, fid):
     return r
 
 
-def set_status(c, e, status, uid, reason="", note=""):
-    """Equipment status is entered by the site manager (no sensor connected). A stop opens a stop record."""
-    t = now()
+def set_status(c, e, status, uid, reason="", note="", at=None, src="manual"):
+    """Status comes from the site manager, or from the drive via the gateway (src='sensor'). A stop opens a stop record."""
+    t = at or now()
     open_stop = c.execute("SELECT id FROM stops WHERE equipment_id=? AND ended_at IS NULL", (e["id"],)).fetchone()
     if status == "stopped" and not open_stop:
-        c.execute("INSERT INTO stops(factory_id,equipment_id,started_at,reason,note,user_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
-                  (e["factory_id"], e["id"], t, reason, note, uid, t, t))
+        c.execute("INSERT INTO stops(factory_id,equipment_id,started_at,reason,note,user_id,created_at,updated_at,source,reason_src) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                  (e["factory_id"], e["id"], t, reason, note, uid, now(), now(), src, src if reason else ""))
     if status != "stopped" and open_stop:
-        c.execute("UPDATE stops SET ended_at=?, updated_at=? WHERE id=?", (t, t, open_stop["id"]))
-    c.execute("UPDATE equipment SET status=?, status_at=? WHERE id=?", (status, t, e["id"]))
+        c.execute("UPDATE stops SET ended_at=max(started_at, ?), updated_at=? WHERE id=?", (t, now(), open_stop["id"]))
+    c.execute("UPDATE equipment SET status=?, status_at=?, status_src=? WHERE id=?", (status, t, src, e["id"]))
 
 
 def state(c, fid, days=14):
@@ -185,7 +214,11 @@ def state(c, fid, days=14):
     for group, key in ((batches, "started_at"), (qcs, "at"), (stops, "started_at"), (losses, "at")):
         for r in group:
             r["day"] = uae_day(r[key])
+    signals = rows("SELECT id, equipment_id, metric, last_value, last_at FROM signals WHERE factory_id=? ORDER BY id", fid)
+    for b in batches:
+        b["s"] = batch_sensors(c, b, signals)
     return {
+        "signals": signals, "gateways": rows("SELECT id, name, created_at, last_seen FROM gateways WHERE factory_id=? ORDER BY id", fid),
         "now": now(), "today": uae_now().date().isoformat(),
         "factory": dict(c.execute("SELECT id, name FROM factories WHERE id=?", (fid,)).fetchone()),
         "settings": {r["key"]: {"value": r["value"], "at": r["updated_at"]} for r in c.execute("SELECT * FROM settings WHERE factory_id=?", (fid,))},
@@ -194,6 +227,236 @@ def state(c, fid, days=14):
         "labour": rows("SELECT * FROM labour WHERE factory_id=? AND day>=? ORDER BY day DESC", fid, (uae_now() - dt.timedelta(days=days)).date().isoformat()),
         "events": rows("SELECT events.*, users.name AS who FROM events LEFT JOIN users ON users.id=events.user_id WHERE factory_id=? ORDER BY events.id DESC LIMIT 40", fid),
     }
+
+
+def batch_sensors(c, b, signals):
+    """Sensor values during a batch, from the signals of its mixer. Empty when nothing is connected."""
+    out, end = {}, b["finished_at"] or "9999"
+    for sg in signals:
+        if sg["equipment_id"] != b["equipment_id"]:
+            continue
+        r = c.execute("SELECT COUNT(*) n, SUM(value) s, MIN(value) lo, MAX(value) hi, AVG(value) av, MAX(at) last FROM readings "
+                      "WHERE signal_id=? AND at>=? AND at<=?", (sg["id"], b["started_at"], end)).fetchone()
+        if not r["n"]:
+            continue
+        m = sg["metric"]
+        if m == "weigh_kg":
+            out["kg"], out["weighings"], out["kg_at"] = r["s"], r["n"], r["last"]
+        elif m == "temp_c":
+            out["temp"] = {"lo": r["lo"], "hi": r["hi"], "at": r["last"],
+                           "last": c.execute("SELECT value FROM readings WHERE signal_id=? AND at<=? ORDER BY at DESC LIMIT 1", (sg["id"], end)).fetchone()[0]}
+        elif m == "current_pct":
+            out["current"] = {"avg": r["av"], "hi": r["hi"], "at": r["last"]}
+        elif m == "energy_kwh" and r["n"] > 1:
+            out["kwh"], out["kwh_at"] = r["hi"] - r["lo"], r["last"]
+    return out
+
+
+def gateway_key(raw):
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def first_number(v):
+    if isinstance(v, bool):
+        return float(v)
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, list) and v:
+        return first_number(v[0])
+    if isinstance(v, str):
+        m = re.search(r"-?\d+(?:\.\d+)?", v)
+        return float(m.group()) if m else None
+    return None
+
+
+def reading_time(v):
+    """Unix seconds or ISO time from the gateway; None if missing. Readings more than 5 min ahead or 2 days old are refused."""
+    if v in (None, ""):
+        return None
+    try:
+        t = dt.datetime.fromtimestamp(float(v), dt.timezone.utc)
+    except (TypeError, ValueError, OverflowError, OSError):
+        try:
+            t = dt.datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=UAE)
+    n = dt.datetime.now(dt.timezone.utc)
+    if not (n - dt.timedelta(days=2) <= t <= n + dt.timedelta(minutes=5)):
+        return False
+    return t.astimezone(dt.timezone.utc).isoformat(timespec="seconds")
+
+
+def collect(body):
+    """Accepts {"readings":[{"tag","value","at"}]}, a flat {"tag": value}, or nested lists/objects (e.g. Teltonika segments)
+    where an object has a name (tag / name / request_name) and a value (value / data)."""
+    out = []
+
+    def walk(o, depth=0):
+        if depth > 6:
+            return
+        if isinstance(o, list):
+            for x in o:
+                walk(x, depth + 1)
+        elif isinstance(o, dict):
+            name = next((o[k] for k in ("tag", "name", "request_name", "Request name") if isinstance(o.get(k), str)), None)
+            val = next((o[k] for k in ("value", "data", "Register data", "raw") if k in o), None)
+            at = next((o[k] for k in ("at", "ts", "timestamp", "time", "date", "Date") if k in o), None)
+            if name is not None and val is not None:
+                out.append((name.strip(), first_number(val), at))
+                return
+            for k, v in o.items():
+                if isinstance(v, (dict, list)):
+                    walk(v, depth + 1)
+                elif depth == 0 and k not in ("at", "ts", "timestamp", "time", "date", "Date"):
+                    n = first_number(v)
+                    if n is not None:
+                        out.append((str(k).strip(), n, o.get("at") or o.get("ts")))
+    walk(body)
+    return out
+
+
+def ingest(c, environ, body):
+    raw = environ.get("HTTP_X_GATEWAY_KEY") or ""
+    auth = environ.get("HTTP_AUTHORIZATION") or ""
+    if not raw and auth.lower().startswith("bearer "):
+        raw = auth[7:].strip()
+    g = c.execute("SELECT * FROM gateways WHERE key_hash=?", (gateway_key(raw),)).fetchone() if raw else None
+    need(g, "Unknown gateway key.", 401)
+    fid = g["factory_id"]
+    sigs = {r["tag"]: r for r in c.execute("SELECT * FROM signals WHERE factory_id=?", (fid,))}
+    items, unknown, refused, saved = collect(body), set(), 0, 0
+    got = []
+    for tag, v, at in items:
+        if tag not in sigs:
+            unknown.add(tag[:60])
+            continue
+        t = reading_time(at)
+        if t is False or v is None or not math.isfinite(v) or abs(v) > 1e12:
+            refused += 1
+            continue
+        sg = sigs[tag]
+        got.append((t or now(), sg, v * sg["mult"] + sg["plus"]))
+    got.sort(key=lambda x: x[0])
+    gap = lambda a, b: a and (dt.datetime.fromisoformat(b) - dt.datetime.fromisoformat(a)).total_seconds() >= QUIET_MIN * 60
+    gw_down = gap(g["last_seen"], now())
+    if gw_down:
+        c.execute("INSERT INTO outages(factory_id,kind,ref_id,started_at,ended_at) VALUES(?,?,?,?,?)", (fid, "gateway", g["id"], g["last_seen"], now()))
+    else:
+        for sid in {sg["id"] for _, sg, _ in got}:
+            first = min(t for t, sg, _ in got if sg["id"] == sid)
+            last = next(sg["last_at"] for _, sg, _ in got if sg["id"] == sid)
+            if gap(last, first):
+                c.execute("INSERT INTO outages(factory_id,kind,ref_id,started_at,ended_at) VALUES(?,?,?,?,?)", (fid, "signal", sid, last, first))
+    for t, sg, v in got:
+        if c.execute("INSERT OR IGNORE INTO readings(factory_id,signal_id,at,value) VALUES(?,?,?,?)", (fid, sg["id"], t, v)).rowcount:
+            saved += 1
+            fresh = c.execute("UPDATE signals SET last_value=?, last_at=? WHERE id=? AND (last_at IS NULL OR last_at<=?)", (v, t, sg["id"], t)).rowcount
+            if fresh:
+                react(c, fid, sg, v, t)
+    c.execute("UPDATE gateways SET last_seen=?, last_payload=?, last_unknown=? WHERE id=?",
+              (now(), json.dumps(body)[:3000], ", ".join(sorted(unknown))[:500], g["id"]))
+    return {"ok": True, "saved": saved, "unknown_tags": sorted(unknown), "refused": refused}
+
+
+def react(c, fid, sg, v, t):
+    """Turn the newest drive values into status and stops. A stop is counted only while a batch is mixing or re-mixing."""
+    e = c.execute("SELECT * FROM equipment WHERE id=?", (sg["equipment_id"],)).fetchone()
+    if not e:
+        return
+    if sg["metric"] == "speed_hz":
+        busy = c.execute("SELECT 1 FROM batches WHERE equipment_id=? AND status IN ('mixing','remix')", (e["id"],)).fetchone()
+        open_stop = c.execute("SELECT * FROM stops WHERE equipment_id=? AND ended_at IS NULL", (e["id"],)).fetchone()
+        if v > RUNNING_HZ:
+            if e["status"] != "running" or open_stop or e["status_src"] != "sensor":
+                set_status(c, e, "running", None, at=t, src="sensor")
+        elif busy and not open_stop:
+            trip = c.execute("SELECT last_value FROM signals WHERE equipment_id=? AND metric='trip'", (e["id"],)).fetchone()
+            code = int(trip["last_value"]) if trip and trip["last_value"] else 0
+            set_status(c, e, "stopped", None, "Drive fault" if code else "", f"Trip code {code}" if code else "", at=t, src="sensor")
+            log(c, fid, None, "stop", f"{e['name']} stopped during a batch (drive signal)")
+        elif not busy and not open_stop and (e["status"] != "idle" or e["status_src"] != "sensor"):
+            set_status(c, e, "idle", None, at=t, src="sensor")
+    elif sg["metric"] == "trip" and v and v != sg["last_value"]:
+        log(c, fid, None, "trip", f"{e['name']} drive trip code {int(v)}")
+        c.execute("UPDATE stops SET reason='Drive fault', reason_src='sensor', note=?, updated_at=? WHERE equipment_id=? AND ended_at IS NULL AND reason=''",
+                  (f"Trip code {int(v)}", now(), e["id"]))
+
+
+PRIVATE_METRICS = ("weigh_kg",)  # production figures: the OmniSite team sees that data arrives, not the value
+
+
+def support_rows(c, where="1=1", *a):
+    return [dict(r) for r in c.execute(
+        "SELECT s.*, f.name AS factory, u.name AS who FROM support s JOIN factories f ON f.id=s.factory_id "
+        f"LEFT JOIN users u ON u.id=s.user_id WHERE {where} ORDER BY s.status='resolved', s.id DESC LIMIT 200", a)]
+
+
+def health(c, fid):
+    """What the OmniSite team sees of a factory: setup and connection health only, never its records or money."""
+    rows = lambda q, *a: [dict(r) for r in c.execute(q, a).fetchall()]
+    signals = rows("SELECT id, equipment_id, metric, last_value, last_at FROM signals WHERE factory_id=? ORDER BY id", fid)
+    for x in signals:
+        if x["metric"] in PRIVATE_METRICS:
+            x["last_value"] = None
+    return {"health_only": True, "now": now(), "today": uae_now().date().isoformat(),
+            "factory": dict(c.execute("SELECT id, name FROM factories WHERE id=?", (fid,)).fetchone()),
+            "equipment": rows("SELECT id, factory_id, name, kind, status, status_at, status_src FROM equipment WHERE factory_id=? ORDER BY id", fid),
+            "signals": signals, "gateways": rows("SELECT id, name, created_at, last_seen FROM gateways WHERE factory_id=? ORDER BY id", fid)}
+
+
+def connections_api(c, method, path, body, fid, uid):
+    if method == "GET" and path == "/api/connections":
+        rows = lambda q, *a: [{**dict(r), **({"value": None} if "value" in r.keys() and r["metric"] in PRIVATE_METRICS else {}),
+                               **({"last_value": None} if "last_value" in r.keys() and r["metric"] in PRIVATE_METRICS else {})}
+                              for r in c.execute(q, a).fetchall()]
+        return {"gateways": rows("SELECT id, name, created_at, last_seen, last_payload, last_unknown FROM gateways WHERE factory_id=? ORDER BY id", fid),
+                "signals": rows("SELECT * FROM signals WHERE factory_id=? ORDER BY id", fid),
+                "readings": rows("SELECT r.at, r.value, s.tag, s.metric, s.equipment_id FROM readings r JOIN signals s ON s.id=r.signal_id "
+                                 "WHERE r.factory_id=? ORDER BY r.at DESC, r.id DESC LIMIT 100", fid),
+                "private_metrics": list(PRIVATE_METRICS),
+                "metrics": {k: {"label": v[0], "unit": v[1]} for k, v in METRICS.items()}}
+    need(method == "POST", "Not found.", 404)
+    if path == "/api/gateways":
+        name = text(body.get("name"), 60)
+        need(name, "Enter a name, e.g. Gateway near Mixer 1.")
+        key = "omg_" + secrets.token_urlsafe(24)
+        c.execute("INSERT INTO gateways(factory_id,name,key_hash,created_at) VALUES(?,?,?,?)", (fid, name, gateway_key(key), now()))
+        log(c, fid, uid, "gateway", f"Gateway {name} added")
+        return {"ok": True, "key": key}
+    m = re.fullmatch(r"/api/gateways/(\d+)/remove", path)
+    if m:
+        g = get(c, "gateways", int(m.group(1)), "gateway", fid)
+        c.execute("DELETE FROM gateways WHERE id=?", (g["id"],))
+        log(c, fid, uid, "gateway", f"Gateway {g['name']} removed (its key no longer works)")
+        return {"ok": True}
+    if path == "/api/signals":
+        e = get(c, "equipment", int(body.get("equipment_id") or 0), "equipment", fid)
+        metric, tag = body.get("metric"), text(body.get("tag"), 60)
+        need(metric in METRICS, "Pick what it measures.")
+        need(metric != "weigh_kg" or e["kind"] == "mixer", "Link the scale to the mixer it fills, so the kg count into that mixer's batch.")
+        need(re.fullmatch(r"[A-Za-z0-9_.\-]{1,60}", tag or ""), "Enter the tag name the gateway sends (letters, numbers, _ . -).")
+        need(not c.execute("SELECT 1 FROM signals WHERE factory_id=? AND tag=?", (fid, tag)).fetchone(), f"The tag {tag} is already used.", 409)
+        need(not c.execute("SELECT 1 FROM signals WHERE equipment_id=? AND metric=?", (e["id"], metric)).fetchone(),
+             f"{e['name']} already has a {METRICS[metric][0].lower()} signal.", 409)
+        mult = num(body.get("mult"), "the multiplier", -1e9, 1e9, required=False)
+        plus = num(body.get("plus"), "the offset", -1e9, 1e9, required=False)
+        c.execute("INSERT INTO signals(factory_id,equipment_id,metric,tag,mult,plus,created_at) VALUES(?,?,?,?,?,?,?)",
+                  (fid, e["id"], metric, tag, 1 if mult is None else mult, plus or 0, now()))
+        log(c, fid, uid, "gateway", f"Signal {tag} → {e['name']} {METRICS[metric][0].lower()}")
+        return {"ok": True}
+    m = re.fullmatch(r"/api/signals/(\d+)/remove", path)
+    if m:
+        sg = get(c, "signals", int(m.group(1)), "signal", fid)
+        c.execute("INSERT INTO readings_archive(factory_id,equipment_id,metric,tag,at,value,signal_removed_at) "
+                  "SELECT r.factory_id, ?, ?, ?, r.at, r.value, ? FROM readings r WHERE r.signal_id=?",
+                  (sg["equipment_id"], sg["metric"], sg["tag"], now(), sg["id"]))  # sensor history is kept for forecasting
+        c.execute("DELETE FROM readings WHERE signal_id=?", (sg["id"],))
+        c.execute("DELETE FROM signals WHERE id=?", (sg["id"],))
+        log(c, fid, uid, "gateway", f"Signal {sg['tag']} removed")
+        return {"ok": True}
+    raise HTTPError(404, "Not found.")
 
 
 def access(c, user, fid):
@@ -221,7 +484,16 @@ def admin_api(c, method, path, body, user):
         return {"factories": [dict(r) for r in c.execute("SELECT * FROM factories ORDER BY name")],
                 "people": [dict(r) for r in c.execute("SELECT m.factory_id, m.role, u.id AS user_id, u.name, u.email FROM memberships m "
                                                          "JOIN users u ON u.id=m.user_id ORDER BY u.name")],
-                "team": [dict(r) for r in c.execute("SELECT id, name, email FROM users WHERE is_admin=1 ORDER BY name")]}
+                "team": [dict(r) for r in c.execute("SELECT id, name, email FROM users WHERE is_admin=1 ORDER BY name")],
+                "support": support_rows(c),
+                "outages": [dict(r) for r in c.execute(
+                    "SELECT o.*, f.name AS factory, COALESCE(g.name, e.name) AS name, s.metric FROM outages o JOIN factories f ON f.id=o.factory_id "
+                    "LEFT JOIN gateways g ON o.kind='gateway' AND g.id=o.ref_id LEFT JOIN signals s ON o.kind='signal' AND s.id=o.ref_id "
+                    "LEFT JOIN equipment e ON e.id=s.equipment_id ORDER BY o.ended_at DESC LIMIT 20")],
+                "health": [{**health(c, f["id"]), "faults": [dict(r) for r in c.execute(
+                    "SELECT s.equipment_id, e.name AS equipment, s.last_value AS code, s.last_at FROM signals s JOIN equipment e ON e.id=s.equipment_id "
+                    "WHERE s.factory_id=? AND s.metric='trip' AND s.last_value IS NOT NULL AND s.last_value<>0", (f["id"],))]}
+                    for f in c.execute("SELECT id FROM factories ORDER BY name").fetchall()]}
     need(method == "POST", "Not found.", 404)
     if path == "/api/admin/factories":
         name = text(body.get("name"), 80)
@@ -255,6 +527,12 @@ def admin_api(c, method, path, body, user):
                   (uid, fid, role, now()))
         log(c, fid, user["id"], "people", f"{email} added as {role}")
         return {"ok": True, "existing": bool(u)}
+    if path == "/api/admin/support/resolve":
+        r = c.execute("SELECT * FROM support WHERE id=?", (int(body.get("id") or 0),)).fetchone()
+        need(r, "This request was not found. Refresh the page.", 404)
+        if r["status"] != "resolved":
+            c.execute("UPDATE support SET status='resolved', resolved_at=?, resolved_by=? WHERE id=?", (now(), user["id"], r["id"]))
+        return {"ok": True}
     if path == "/api/admin/people/remove":
         fid, uid = int(body.get("factory_id") or 0), int(body.get("user_id") or 0)
         r = c.execute("SELECT u.email FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.user_id=? AND m.factory_id=?", (uid, fid)).fetchone()
@@ -267,7 +545,8 @@ def admin_api(c, method, path, body, user):
 
 def api(c, method, path, body, user):
     if method == "GET" and path == "/api/meta":
-        return {"kinds": KINDS, "stop_reasons": STOP_REASONS, "loss_types": LOSS_TYPES,
+        return {"kinds": KINDS, "stop_reasons": STOP_REASONS, "loss_types": LOSS_TYPES, "metrics": {k: {"label": v[0], "unit": v[1]} for k, v in METRICS.items()},
+                "quiet_min": QUIET_MIN,
                 "settings": {k: v[0] for k, v in SETTINGS.items()}}
     if path == "/api/admin" or path.startswith("/api/admin/"):
         return admin_api(c, method, path, body, user)
@@ -282,8 +561,22 @@ def api(c, method, path, body, user):
 def factory_api(c, method, path, body, user, fid, role):
     uid = user["id"]
     if method == "GET" and path == "/api/state":
-        return state(c, fid)
+        return health(c, fid) if role == "admin" else {**state(c, fid), "support": support_rows(c, "s.factory_id=?", fid)}
+    if path == "/api/support":
+        need(method == "POST", "Not found.", 404)
+        need(role in ROLES, "Support requests come from the factory's site manager or owner.", 403)
+        msg = text(body.get("text"), 1000)
+        need(msg, "Write what went wrong.")
+        dup = c.execute("SELECT id FROM support WHERE factory_id=? AND user_id=? AND text=? AND status='open'", (fid, uid, msg)).fetchone()
+        if dup:
+            return {"ok": True, "id": dup["id"], "existing": True}
+        rid = c.execute("INSERT INTO support(factory_id,user_id,at,text) VALUES(?,?,?,?)", (fid, uid, now(), msg)).lastrowid
+        return {"ok": True, "id": rid}
+    if path in ("/api/connections", "/api/gateways", "/api/signals") or re.fullmatch(r"/api/(gateways|signals)/\d+/remove", path):
+        need(role == "admin", "Only the OmniSite team can set up connections.", 403)
+        return connections_api(c, method, path, body, fid, uid)
     need(method == "POST", "Not found.", 404)
+    need(role != "admin" or path == "/api/equipment", "The OmniSite team doesn't see or enter the factory's records. The site manager does.", 403)
     need(role in ("admin", "manager"), "View only. The site manager enters this information.", 403)
 
     if path == "/api/settings":
@@ -303,6 +596,7 @@ def factory_api(c, method, path, body, user, fid, role):
         return {"ok": True}
 
     if path == "/api/equipment":
+        need(role == "admin", "Pilot equipment is set by the OmniSite team from the approved site survey.", 403)
         name, kind = text(body.get("name"), 60), body.get("kind")
         need(name, "Enter a name, e.g. Mixer 1.")
         need(kind in KINDS, "Pick the type of equipment.")
@@ -314,6 +608,7 @@ def factory_api(c, method, path, body, user, fid, role):
 
     m = re.fullmatch(r"/api/equipment/(\d+)/status", path)
     if m:
+        need(role == "admin", "View only. The site manager adds notes and reasons; OmniSite never switches equipment on or off.", 403)
         e = get(c, "equipment", int(m.group(1)), "equipment", fid)
         st = body.get("status")
         need(st in ("running", "idle", "stopped"), "Pick running, idle or stopped.")
@@ -329,6 +624,7 @@ def factory_api(c, method, path, body, user, fid, role):
         return {"ok": True}
 
     if path == "/api/batches":
+        need(role == "manager", "Only the site manager records a batch start. It is a record only; nothing switches the mixer on or off.", 403)
         e = get(c, "equipment", int(body.get("equipment_id") or 0), "mixer", fid)
         need(e["kind"] == "mixer", "Batches can only be started on a mixer.")
         busy = c.execute("SELECT code FROM batches WHERE equipment_id=? AND status IN ('mixing','remix','passed')", (e["id"],)).fetchone()
@@ -347,10 +643,15 @@ def factory_api(c, method, path, body, user, fid, role):
         log(c, fid, uid, "batch", f"Started {code} on {e['name']}")
         return {"ok": True, "code": code}
 
-    m = re.fullmatch(r"/api/batches/(\d+)/(qc|move)", path)
+    m = re.fullmatch(r"/api/batches/(\d+)/(qc|move|kg)", path)
     if m:
         b = get(c, "batches", int(m.group(1)), "batch", fid)
         e = get(c, "equipment", b["equipment_id"], "mixer", fid)
+        if m.group(2) == "kg":
+            kg = num(body.get("kg"), "the material used in kg", 0.01, 1_000_000)
+            c.execute("UPDATE batches SET kg_used=?, kg_at=? WHERE id=?", (kg, now(), b["id"]))
+            log(c, fid, uid, "batch", f"{b['code']} material used: {kg:g} kg")
+            return {"ok": True}
         if m.group(2) == "move":
             need(b["status"] == "passed", f"{b['code']} must pass QC before it is moved." if b["status"] != "moved"
                  else f"{b['code']} is already marked as moved.", 409)
@@ -401,7 +702,7 @@ def factory_api(c, method, path, body, user, fid, role):
         reason, note = body.get("reason"), text(body.get("note"))
         need(reason in STOP_REASONS, "Pick a reason.")
         need(reason != "Other" or note, 'Add a short note for "Other".')
-        c.execute("UPDATE stops SET reason=?, note=?, updated_at=? WHERE id=?", (reason, note, now(), s["id"]))
+        c.execute("UPDATE stops SET reason=?, reason_src='manual', note=?, updated_at=? WHERE id=?", (reason, note, now(), s["id"]))
         e = get(c, "equipment", s["equipment_id"], "equipment", fid)
         log(c, fid, uid, "stop", f"Stop reason for {e['name']}: {reason}")
         return {"ok": True}
@@ -424,10 +725,18 @@ def factory_api(c, method, path, body, user, fid, role):
     if path == "/api/labour":
         day = text(body.get("day"), 10) or uae_now().date().isoformat()
         need(re.fullmatch(r"\d{4}-\d{2}-\d{2}", day) and day <= uae_now().date().isoformat(), "Pick a day that is not in the future.")
-        hours = num(body.get("hours"), "the staff-hours", 0.25, 2000)
-        c.execute("INSERT INTO labour VALUES(?,?,?,?,?) ON CONFLICT(factory_id,day) DO UPDATE SET hours=excluded.hours,"
-                  "user_id=excluded.user_id,updated_at=excluded.updated_at", (fid, day, hours, uid, now()))
-        log(c, fid, uid, "labour", f"Labour {day}: {hours:g} staff-hours")
+        people = each = None
+        if body.get("people") not in (None, ""):
+            people = num(body.get("people"), "the number of people", 1, 500)
+            need(people == int(people), "The number of people must be a whole number.")
+            people, each = int(people), num(body.get("hours_each"), "the hours each person worked", 0.25, 24)
+            hours = people * each
+        else:
+            hours = num(body.get("hours"), "the staff-hours", 0.25, 2000)
+        c.execute("INSERT INTO labour(factory_id,day,hours,user_id,updated_at,people,hours_each) VALUES(?,?,?,?,?,?,?) "
+                  "ON CONFLICT(factory_id,day) DO UPDATE SET hours=excluded.hours, people=excluded.people, hours_each=excluded.hours_each,"
+                  "user_id=excluded.user_id,updated_at=excluded.updated_at", (fid, day, hours, uid, now(), people, each))
+        log(c, fid, uid, "labour", f"Labour {day}: " + (f"{people} people × {each:g} h = " if people else "") + f"{hours:g} staff-hours")
         return {"ok": True}
 
     raise HTTPError(404, "Not found.")
@@ -488,6 +797,11 @@ def application(environ, start):
         need(n <= 64 * 1024, "Request too big.", 413)
         raw = environ["wsgi.input"].read(n) if n else b""
         body = json.loads(raw) if raw else {}
+        if path == "/api/ingest" and method == "POST":
+            need(isinstance(body, (dict, list)), "Bad request.")
+            out = ingest(c, environ, body)
+            c.commit()
+            return respond(start, STATUS[200], out)
         need(isinstance(body, dict), "Bad request.")
         if path == "/api/login" and method == "POST":
             u = c.execute("SELECT * FROM users WHERE lower(email)=lower(?)", (text(body.get("email"), 200),)).fetchone()
