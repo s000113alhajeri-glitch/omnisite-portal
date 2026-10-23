@@ -223,6 +223,9 @@ class Gateway(unittest.TestCase):
         st = call("GET", F + "/state", None, m)[1]
         stop = st["stops"][0]
         self.assertEqual((stop["source"], stop["reason"], stop["note"], stop["ended_at"]), ("sensor", "Drive fault", "Trip code 1", None))
+        self.assertEqual(stop["reason_src"], "sensor")  # automatic reason is labelled Sensor
+        st2 = P(f"/stops/{stop['id']}", {"reason": "Drive fault", "note": "belt slipped"}, m)
+        self.assertEqual([x["reason_src"] for x in st2["stops"] if x["id"] == stop["id"]], ["manual"])  # until the manager edits it
         b = st["batches"][0]["s"]
         self.assertEqual((b["kg"], b["weighings"], round(b["kwh"], 3), b["temp"]["last"]), (550, 2, 2.5, 41.5))
         ingest(key, {"readings": [{"tag": "m1_hz", "value": 4800, "at": t0 + 200}]})

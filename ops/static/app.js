@@ -82,6 +82,7 @@ const SRC = (i, t) => `<span class="src"><i>${i}</i>${t}</span>`;
 const manual = t => SRC("✎", "Manual · " + t), est = t => SRC("≈", "Estimate · " + t);
 const sensor = t => SRC("●", "Sensor · " + t);
 const srcOf = (x, t) => x && x.source === "sensor" ? sensor(t) : manual(t);
+const reasonSrc = (s, t) => s.reason_src === "sensor" ? sensor(t) : manual(t);
 const sig = (eid, m) => (S.d.signals || []).find(x => x.equipment_id === eid && x.metric === m);
 const unit = m => S.meta.metrics[m].unit;
 const sigVal = x => x.last_value === null ? NR("No data yet") : x.metric === "trip" ? (x.last_value ? `<span class="st"><span class="dot r"></span>Trip ${fmt(x.last_value)}</span>` : "No trip") : `${fmt(x.last_value, 2)} ${unit(x.metric)}`;
@@ -144,6 +145,10 @@ function dayMins(s, day) {  // minutes of stop s that fall on this UAE day
 const hasDay = d => S.d.batches.some(b => b.day === d || finishedDay(b) === d) || S.d.qc.some(q => dayOf(q.at) === d) || S.d.stops.some(s => dayOf(s.started_at) === d) || S.d.losses.some(l => l.day === d) || S.d.labour.some(l => l.day === d);
 const NRs = `<span class="nr">Not recorded</span>`;
 const inBatch = s => S.d.batches.some(b => b.equipment_id === s.equipment_id && b.started_at <= (s.ended_at || "9999") && (b.finished_at || "9999") >= s.started_at);
+const batchMins = (s, from) => {  // minutes of this stop that fall inside a batch on the same mixer
+  const t = x => x ? new Date(x).getTime() : Date.now(), a = Math.max(t(s.started_at), from ? t(from) : 0), z = t(s.ended_at);
+  return Math.round(S.d.batches.filter(b => b.equipment_id === s.equipment_id).reduce((m, b) => m + Math.max(0, Math.min(z, t(b.finished_at)) - Math.max(a, t(b.started_at))), 0) / 6e4);
+};
 function week() {
   const days = lastDays(7), set = new Set(days);
   const fin = S.d.batches.filter(b => set.has(finishedDay(b)));
@@ -164,7 +169,7 @@ function week() {
   const n = [0, 0, 0]; fin.forEach(b => n[cls(b)]++);
   const withKg = fin.filter(b => kgOf(b) != null), kgUsed = withKg.reduce((a, b) => a + kgOf(b), 0);
   const timed = S.d.batches.filter(b => b.finished_at && b.status !== "rejected");
-  const batchStopMin = stops.filter(s => eq(s.equipment_id).kind === "mixer" && inBatch(s)).reduce((a, s) => a + sm(s), 0);
+  const batchStopMin = stops.filter(s => eq(s.equipment_id).kind === "mixer").reduce((a, s) => a + batchMins(s, ws), 0);
   const avgMin = timed.length ? timed.reduce((a, b) => a + minsBetween(b.started_at, b.finished_at), 0) / timed.length : null;
   return {days, daily, fin, n, stops, stopMin, mixerStopMin, reasons, causes, perDay, losses, lossKg, lab, labH, withKg, kgUsed, avgMin,
     lost: avgMin && timed.length >= 5 ? batchStopMin / avgMin : null, batchStopMin, timedN: timed.length, rec: days.some(hasDay),
@@ -393,7 +398,7 @@ function owner() {
   const waiting = S.d.batches.filter(b => b.status === "passed"), remix = S.d.batches.filter(b => b.status === "remix");
   let light;
   if (!S.d.equipment.length) light = {c: "n", label: "Not set up", line: "The site manager hasn't added equipment yet."};
-  else if (stopped.length) { const s = openStop(stopped[0].id); light = {c: "r", label: "Needs attention", line: `${h(stopped.map(e => e.name).join(", "))} stopped.`, sub: s.reason ? `Reason: <b style="color:var(--ink)">${h(s.reason)}</b>` : "Reason not entered yet", src: s.reason && s.source !== "sensor" ? manual(when(s.updated_at)) : srcOf(s, when(s.started_at))}; }
+  else if (stopped.length) { const s = openStop(stopped[0].id); light = {c: "r", label: "Needs attention", line: `${h(stopped.map(e => e.name).join(", "))} stopped.`, sub: s.reason ? `Reason: <b style="color:var(--ink)">${h(s.reason)}</b>` : "Reason not entered yet", src: s.reason ? reasonSrc(s, when(s.updated_at)) : srcOf(s, when(s.started_at))}; }
   else if (waiting.length || remix.length) light = {c: "a", label: "Waiting", line: waiting.length ? `${h(waiting[0].code)} passed QC and is waiting to move.` : `${h(remix[0].code)} is being re-mixed.`};
   else if (mixers().some(e => eqState(e).st === "g")) light = {c: "g", label: "OK", line: "Running normally."};
   else light = {c: "n", label: "No batch running", line: "No batch is in progress right now."};
@@ -491,8 +496,8 @@ function drawer(k) {
     const s = S.d.stops.find(x => x.id === n); if (!s) return null; const e = eq(s.equipment_id);
     let body = `${s.ended_at ? stLine("n", `Restarted · stopped for ${mins(minsBetween(s.started_at, s.ended_at))}`) : stLine("r", `Stopped · ${mins(minsBetween(s.started_at))}`)}
       ${tl([[hm(s.started_at), "r", `${h(e.name)} stopped`], ...(s.ended_at ? [[hm(s.ended_at), "g", "Restarted"]] : [])])}
-      <h4>Reason</h4>${rows([["Reason", s.reason ? h(s.reason) : `<span class="nr">Not entered</span>`, s.reason ? manual(when(s.updated_at)) : ""], ...(s.note ? [["Note", h(s.note), ""]] : [])])}
-      ${e.kind === "mixer" ? `<h4>Effect</h4>${!inBatch(s) ? `<div class="why">No batch was running on this mixer, so no batch was lost.</div>` : lostLine(minsBetween(s.started_at, s.ended_at), week()) || `<div class="why">Less than 1 minute</div>`}` : ""}`;
+      <h4>Reason</h4>${rows([["Reason", s.reason ? h(s.reason) : `<span class="nr">Not entered</span>`, s.reason ? reasonSrc(s, when(s.updated_at)) : ""], ...(s.note ? [["Note", h(s.note), ""]] : [])])}
+      ${e.kind === "mixer" ? `<h4>Effect</h4>${!inBatch(s) ? `<div class="why">No batch was running on this mixer, so no batch was lost.</div>` : lostLine(batchMins(s), week()) || `<div class="why">Less than 1 minute</div>`}` : ""}`;
     let after;
     if (!ro) {
       body += form("fStop", s.reason ? "Change the reason" : "Add the stop reason", "Shown to the owner in “Why equipment stopped”.",

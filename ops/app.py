@@ -104,7 +104,7 @@ def db():
 
 
 ADDED_COLUMNS = {"batches": {"kg_used": "REAL", "kg_at": "TEXT"}, "labour": {"people": "INTEGER", "hours_each": "REAL"},
-                 "stops": {"source": "TEXT DEFAULT 'manual'"}, "equipment": {"status_src": "TEXT DEFAULT 'manual'"}}
+                 "stops": {"source": "TEXT DEFAULT 'manual'", "reason_src": "TEXT DEFAULT ''"}, "equipment": {"status_src": "TEXT DEFAULT 'manual'"}}
 
 
 def init():
@@ -190,8 +190,8 @@ def set_status(c, e, status, uid, reason="", note="", at=None, src="manual"):
     t = at or now()
     open_stop = c.execute("SELECT id FROM stops WHERE equipment_id=? AND ended_at IS NULL", (e["id"],)).fetchone()
     if status == "stopped" and not open_stop:
-        c.execute("INSERT INTO stops(factory_id,equipment_id,started_at,reason,note,user_id,created_at,updated_at,source) VALUES(?,?,?,?,?,?,?,?,?)",
-                  (e["factory_id"], e["id"], t, reason, note, uid, now(), now(), src))
+        c.execute("INSERT INTO stops(factory_id,equipment_id,started_at,reason,note,user_id,created_at,updated_at,source,reason_src) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                  (e["factory_id"], e["id"], t, reason, note, uid, now(), now(), src, src if reason else ""))
     if status != "stopped" and open_stop:
         c.execute("UPDATE stops SET ended_at=max(started_at, ?), updated_at=? WHERE id=?", (t, now(), open_stop["id"]))
     c.execute("UPDATE equipment SET status=?, status_at=?, status_src=? WHERE id=?", (status, t, src, e["id"]))
@@ -364,7 +364,7 @@ def react(c, fid, sg, v, t):
             set_status(c, e, "idle", None, at=t, src="sensor")
     elif sg["metric"] == "trip" and v and v != sg["last_value"]:
         log(c, fid, None, "trip", f"{e['name']} drive trip code {int(v)}")
-        c.execute("UPDATE stops SET reason='Drive fault', note=?, updated_at=? WHERE equipment_id=? AND ended_at IS NULL AND reason=''",
+        c.execute("UPDATE stops SET reason='Drive fault', reason_src='sensor', note=?, updated_at=? WHERE equipment_id=? AND ended_at IS NULL AND reason=''",
                   (f"Trip code {int(v)}", now(), e["id"]))
 
 
@@ -632,7 +632,7 @@ def factory_api(c, method, path, body, user, fid, role):
         reason, note = body.get("reason"), text(body.get("note"))
         need(reason in STOP_REASONS, "Pick a reason.")
         need(reason != "Other" or note, 'Add a short note for "Other".')
-        c.execute("UPDATE stops SET reason=?, note=?, updated_at=? WHERE id=?", (reason, note, now(), s["id"]))
+        c.execute("UPDATE stops SET reason=?, reason_src='manual', note=?, updated_at=? WHERE id=?", (reason, note, now(), s["id"]))
         e = get(c, "equipment", s["equipment_id"], "equipment", fid)
         log(c, fid, uid, "stop", f"Stop reason for {e['name']}: {reason}")
         return {"ok": True}
