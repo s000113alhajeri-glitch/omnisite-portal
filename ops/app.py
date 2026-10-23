@@ -10,6 +10,7 @@ import getpass
 import hashlib
 import hmac
 import json
+import math
 import mimetypes
 import os
 import re
@@ -326,7 +327,7 @@ def ingest(c, environ, body):
             unknown.add(tag[:60])
             continue
         t = reading_time(at)
-        if t is False or v is None or v != v:
+        if t is False or v is None or not math.isfinite(v) or abs(v) > 1e12:
             refused += 1
             continue
         sg = sigs[tag]

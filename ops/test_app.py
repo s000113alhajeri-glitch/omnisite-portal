@@ -154,6 +154,33 @@ def ingest(key, body):
 
 
 class Gateway(unittest.TestCase):
+    def test_bad_input_and_isolation(self):
+        with app.db() as c:
+            c.execute("INSERT OR IGNORE INTO users(email,name,is_admin,pw,created_at) VALUES(?,?,1,?,?)", ("g2@omni.ae", "Admin G2", app.hash_pw("correct horse 1"), app.now()))
+        a = login("g2@omni.ae")
+        keys, eids = [], []
+        for name in ("Iso A", "Iso B"):
+            fid = call("POST", "/api/admin/factories", {"name": name}, a)[1]["id"]
+            call("POST", f"/api/f/{fid}/equipment", {"name": "Mixer 1", "kind": "mixer"}, a)
+            eid = call("GET", f"/api/f/{fid}/state", None, a)[1]["equipment"][0]["id"]
+            keys.append(call("POST", f"/api/f/{fid}/gateways", {"name": "GW"}, a)[1]["key"])
+            call("POST", f"/api/f/{fid}/signals", {"equipment_id": eid, "metric": "temp_c", "tag": "t_" + name[-1].lower()}, a)
+            eids.append((fid, eid))
+        # factory A's key cannot write factory B's tag
+        self.assertEqual(ingest(keys[0], {"t_b": 30})[1]["unknown_tags"], ["t_b"])
+        self.assertEqual(call("GET", f"/api/f/{eids[1][0]}/state", None, a)[1]["signals"][0]["last_value"], None)
+        # signal on another factory's equipment is refused
+        self.assertNotEqual(call("POST", f"/api/f/{eids[0][0]}/signals", {"equipment_id": eids[1][1], "metric": "temp_c", "tag": "x"}, a)[0], 200)
+        # bad values and malformed bodies
+        d = ingest(keys[0], {"readings": [{"tag": "t_a", "value": "n/a"}, {"tag": "t_a", "value": 1e300 * 10}, {"tag": "t_a", "value": 1e20}, {"tag": "t_a", "at": "not a date", "value": 5}]})[1]
+        self.assertEqual((d["saved"], d["refused"]), (0, 4))
+        raw = b"{not json"
+        env = {"REQUEST_METHOD": "POST", "PATH_INFO": "/api/ingest", "CONTENT_LENGTH": str(len(raw)), "wsgi.input": io.BytesIO(raw), "HTTP_X_GATEWAY_KEY": keys[0], "wsgi.url_scheme": "http"}
+        out = {}
+        app.application(env, lambda st, h: out.setdefault("s", int(st.split()[0])))
+        self.assertEqual(out["s"], 400)
+        self.assertEqual(ingest(keys[0], "text")[0], 400)
+
     def test_gateway_journey(self):
         with app.db() as c:
             c.execute("INSERT OR IGNORE INTO users(email,name,is_admin,pw,created_at) VALUES(?,?,1,?,?)", ("g@omni.ae", "Admin G", app.hash_pw("correct horse 1"), app.now()))
