@@ -266,6 +266,14 @@ class Gateway(unittest.TestCase):
         self.assertTrue(any(r["value"] is not None for r in cn["readings"] if r["metric"] == "speed_hz"))
         self.assertNotIn("key_hash", cn["gateways"][0]); self.assertTrue(cn["readings"])
         gid = cn["gateways"][0]["id"]
+        sid = [x for x in cn["signals"] if x["metric"] == "speed_hz"][0]["id"]
+        with app.db() as c:
+            n = c.execute("SELECT count(*) FROM readings WHERE signal_id=?", (sid,)).fetchone()[0]
+        self.assertGreater(n, 0)
+        P(f"/signals/{sid}/remove", {})
+        with app.db() as c:  # removing a signal keeps its sensor history
+            self.assertEqual(c.execute("SELECT count(*) FROM readings_archive WHERE factory_id=? AND metric='speed_hz' AND tag='m1_hz'", (fid,)).fetchone()[0], n)
+            self.assertEqual(c.execute("SELECT count(*) FROM readings WHERE signal_id=?", (sid,)).fetchone()[0], 0)
         P(f"/gateways/{gid}/remove", {})
         self.assertEqual(ingest(key, {"m1_hz": 1})[0], 401)  # removed key stops working
 

@@ -79,6 +79,8 @@ CREATE TABLE IF NOT EXISTS readings(id INTEGER PRIMARY KEY, factory_id INTEGER N
   at TEXT NOT NULL, value REAL NOT NULL, UNIQUE(signal_id, at));
 CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY, factory_id INTEGER, at TEXT NOT NULL, user_id INTEGER,
   kind TEXT NOT NULL, text TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS readings_archive(id INTEGER PRIMARY KEY, factory_id INTEGER NOT NULL, equipment_id INTEGER, metric TEXT NOT NULL,
+  tag TEXT NOT NULL, at TEXT NOT NULL, value REAL NOT NULL, signal_removed_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS support(id INTEGER PRIMARY KEY, factory_id INTEGER NOT NULL REFERENCES factories(id), user_id INTEGER,
   at TEXT NOT NULL, text TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open', resolved_at TEXT, resolved_by INTEGER);
 """
@@ -435,6 +437,9 @@ def connections_api(c, method, path, body, fid, uid):
     m = re.fullmatch(r"/api/signals/(\d+)/remove", path)
     if m:
         sg = get(c, "signals", int(m.group(1)), "signal", fid)
+        c.execute("INSERT INTO readings_archive(factory_id,equipment_id,metric,tag,at,value,signal_removed_at) "
+                  "SELECT r.factory_id, ?, ?, ?, r.at, r.value, ? FROM readings r WHERE r.signal_id=?",
+                  (sg["equipment_id"], sg["metric"], sg["tag"], now(), sg["id"]))  # sensor history is kept for forecasting
         c.execute("DELETE FROM readings WHERE signal_id=?", (sg["id"],))
         c.execute("DELETE FROM signals WHERE id=?", (sg["id"],))
         log(c, fid, uid, "gateway", f"Signal {sg['tag']} removed")
