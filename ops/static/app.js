@@ -20,9 +20,9 @@ const stCls = {g: "g", a: "a", r: "r", n: "n"};
 function ic(name, st, opt = {}) { return `<span class="ic ${opt.size || ""} ${opt.spin ? "spin" : ""}" aria-hidden="true"><svg viewBox="0 0 24 24">${ICONS[name] || ICONS.other}</svg>${st ? `<span class="bd ${stCls[st]}"></span>` : ""}</span>`; }
 
 // ---------- state + api ----------
-const S = {user: null, meta: null, d: null, key: null, busy: false, fid: null, admin: null, viewAs: localStorage.getItem("omni_viewas") || ""};
+const S = {user: null, meta: null, d: null, key: null, busy: false, fid: null, admin: null, viewAs: localStorage.getItem("omni_viewas") || "", pvName: localStorage.getItem("omni_viewas_name") || ""};
 const fac = () => (S.user.factories || []).find(f => f.id === S.fid);
-const pv = () => S.user && S.user.admin && S.fid && ["manager", "owner"].includes(S.viewAs) ? S.viewAs : "";  // OmniSite team previewing a factory's screens
+const pv = () => { const r = (S.viewAs || "").split(":")[0]; return S.user && S.user.admin && S.fid && ["manager", "owner"].includes(r) ? r : ""; };  // OmniSite team previewing a factory's screens
 const team = () => S.user.admin && !pv();
 const role = () => pv() || (fac() || {}).role;
 const canEdit = () => ["admin", "manager"].includes(role());
@@ -34,8 +34,8 @@ function switchF(id) { S.fid = Number(id); localStorage.setItem("omni_fid", S.fi
 const switcher = () => (S.user.factories || []).length > 1 ? `<select class="inp fsel" aria-label="Factory" onchange="switchF(this.value)">${S.user.factories.map(f => `<option value="${f.id}" ${f.id === S.fid ? "selected" : ""}>${h(f.name)}</option>`).join("")}</select>` : "";
 const PV = {"": "OmniSite team", manager: "Site manager", owner: "Owner"};
 const viewAsSel = () => S.user.admin && S.fid ? `<select class="inp fsel" aria-label="View as" onchange="setViewAs(this.value)">${Object.keys(PV).map(k => `<option value="${k}" ${k === pv() ? "selected" : ""}>View as: ${PV[k]}</option>`).join("")}</select>` : "";
-function setViewAs(v) { S.viewAs = PV[v] && v ? v : ""; if (S.viewAs) localStorage.setItem("omni_viewas", S.viewAs); else localStorage.removeItem("omni_viewas"); closeD(); if (pv() && ["#admin", "#connections"].includes(location.hash)) location.hash = "#overview"; render(); }
-const pvBar = () => pv() ? `<div class="pvbar"><span>Viewing as ${PV[pv()]} · preview, nothing is saved</span><button class="lo" type="button" onclick="setViewAs('')">Back to OmniSite team</button></div>` : "";
+function setViewAs(v, name) { S.viewAs = v && PV[v.split(":")[0]] ? v : ""; S.pvName = S.viewAs && name || ""; if (S.viewAs) localStorage.setItem("omni_viewas", S.viewAs); else localStorage.removeItem("omni_viewas"); if (S.pvName) localStorage.setItem("omni_viewas_name", S.pvName); else localStorage.removeItem("omni_viewas_name"); closeD(); if (pv() && ["#admin", "#connections"].includes(location.hash)) location.hash = "#overview"; render(); }
+const pvBar = () => pv() ? `<div class="pvbar"><span>Viewing as ${S.pvName ? `${h(S.pvName)} (${PV[pv()]})` : PV[pv()]} · preview, nothing is saved</span><button class="lo" type="button" onclick="setViewAs('')">Back to OmniSite team</button></div>` : "";
 const $ = s => document.querySelector(s);
 const h = v => String(v ?? "").replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
 const BASE = location.pathname.replace(/\/[^/]*$/, "");  // "" at /, "/ops" when mounted under /ops/
@@ -253,7 +253,7 @@ function vAdmin() {
     <div class="why">Each factory has its own equipment, records and logins. Site managers and owners only see the factories they're added to. The OmniSite team sees all.</div></section>`;
   const cards = A.factories.map(f => { const ppl = A.people.filter(p => p.factory_id === f.id);
     return `<section class="card c3"><div class="ch"><span class="ct">${ic("mixer")}<b style="font-weight:600;color:var(--ink)">${h(f.name)}</b></span><button class="btn ghost" type="button" data-act="open:${f.id}">Open dashboards</button></div>
-      ${ppl.length ? rows(ppl.map(p => [`${h(p.name)}<div class="why">${h(p.email)}</div>`, `${p.role === "owner" ? "Owner · view only" : "Site manager"} <button class="lo" type="button" data-act="rm:${p.user_id}:${f.id}" aria-label="Remove ${h(p.name)}" style="margin-left:8px;font-weight:400">Remove</button>`, "", ic("person", null, {size: "sm"})])) : empty("No logins yet. Add the site manager and the owner.")}
+      ${ppl.length ? rows(ppl.map(p => [`<button class="lo pname" type="button" data-act="va:${p.user_id}:${f.id}" aria-label="View ${h(p.name)}'s dashboard">${h(p.name)}</button><div class="why">${h(p.email)}</div><button class="lo pview" type="button" data-act="va:${p.user_id}:${f.id}">View dashboard ›</button>`, `${p.role === "owner" ? "Owner · view only" : "Site manager"} <button class="lo" type="button" data-act="rm:${p.user_id}:${f.id}" aria-label="Remove ${h(p.name)}" style="margin-left:8px;font-weight:400">Remove</button>`, "", ic("person", null, {size: "sm"})])) : empty("No logins yet. Add the site manager and the owner.")}
       <div class="btns"><button class="btn ghost" type="button" data-open="addPerson:${f.id}">Add person</button></div></section>`; }).join("");
   const team = `<section class="card c6"><div class="ch"><span class="ct">${ic("person")}OmniSite team · sees all factories</span></div>${rows(A.team.map(u => [h(u.name), h(u.email), ""]))}<div class="why" style="margin-top:8px">Team logins are added by OmniSite on the server.</div></section>`;
   return add + (cards || `<section class="card c6 setup"><div class="muted">No factories yet. Tap “Add factory” to add the first one.</div></section>`) + team;
@@ -600,6 +600,8 @@ async function loadAdmin() { S.admin = await api("GET", "/api/admin"); render();
 async function act(a) {
   const [k, id, st] = a.split(":");
   if (k === "open") return switchF(id);
+  if (k === "va") { const p = S.admin && S.admin.people.find(x => x.user_id === Number(id) && x.factory_id === Number(st)); if (!p) return;
+    setViewAs(`${p.role}:${p.user_id}`, p.name); location.hash = "#overview"; return switchF(st); }
   if (k === "refconn") return loadConn().catch(e => toast(e.error));
   if (k === "rmgw" || k === "rmsig") { if (S.busy || !confirm(k === "rmgw" ? "Remove this gateway? Its key stops working straight away." : "Remove this signal and its readings?")) return; S.busy = true;
     try { await api("POST", `/api/${k === "rmgw" ? "gateways" : "signals"}/${id}/remove`, {}); await reload(); await loadConn(); toast("Removed"); } catch (e) { toast(e.error); } finally { S.busy = false; } return; }
@@ -623,7 +625,7 @@ function loginView() {
     if (!val(f, "email") || !val(f, "password")) { box.textContent = "Enter your email and password."; box.hidden = false; return; }
     b.disabled = true; try { const r = await api("POST", "/api/login", {email: val(f, "email"), password: f.password.value}); S.user = r.user; pickFactory(); await load(); } catch (er) { box.textContent = er.error; box.hidden = false; b.disabled = false; } };
 }
-async function logout() { try { await api("POST", "/api/logout"); } catch (e) {} S.user = null; S.viewAs = ""; localStorage.removeItem("omni_viewas"); closeD(); render(); }
+async function logout() { try { await api("POST", "/api/logout"); } catch (e) {} S.user = null; S.viewAs = ""; S.pvName = ""; localStorage.removeItem("omni_viewas"); localStorage.removeItem("omni_viewas_name"); closeD(); render(); }
 async function reload() { if (S.fid) S.d = await api("GET", "/api/state"); if (view() === "admin") S.admin = await api("GET", "/api/admin"); if (view() === "connections") S.conn = await api("GET", "/api/connections"); render(); }
 async function load() {
   try { if (!S.meta) S.meta = await api("GET", "/api/meta"); await reload(); }
