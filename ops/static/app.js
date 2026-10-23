@@ -555,7 +555,7 @@ function drawer(k) {
   if (kind === "gw") {
     const g = (S.d.gateways || []).find(x => x.id === n); if (!g) return null; const full = S.conn && S.conn.gateways.find(x => x.id === n);
     return {icon: ic("gateway", g.last_seen && !quiet(g) ? "g" : "a"), kicker: "Gateway", title: g.name, body: `${g.last_seen ? stLine(quiet(g) ? "a" : "g", quiet(g) ? "Not sending data" : "Online") : stLine("n", "No data received yet")}
-      ${rows([["Last data", g.last_seen ? when(g.last_seen) : NR(""), g.last_seen ? sensor("received by the server") : ""], ["Signals", String((S.d.signals || []).length), ""]])}
+      ${rows([["Last data", g.last_seen ? when(g.last_seen) : NR(""), g.last_seen ? sensor("received by the server") : ""], ["Signals", String((S.d.signals || []).length), ""], ...(full && full.last_unknown ? [["Tags not linked yet", h(full.last_unknown), "add a signal for each in Connections"]] : [])])}
       ${full && full.last_payload ? `<h4>Last message received</h4><pre class="mono" style="white-space:pre-wrap;word-break:break-all;background:#f7f7f7;border:1px solid var(--line);border-radius:10px;padding:10px;font-size:12px">${h(full.last_payload)}</pre>` : ""}
       <div class="why" style="margin-top:10px">If it stays "Not sending data", check the gateway's power, its 4G signal and the server address.</div>`};
   }
