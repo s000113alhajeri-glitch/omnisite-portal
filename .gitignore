@@ -1,0 +1,3 @@
+crm/data/
+__pycache__/
+*.pyc
