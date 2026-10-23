@@ -14,10 +14,13 @@ const ICONS={
  pump:'<circle cx="10" cy="13" r="6"/><circle cx="10" cy="13" r="1.6"/><path d="M10 7h9v3.5"/><path d="M4 21h12"/><path d="M7 19v2M13 19v2"/>',
  filler:'<path d="M3 4h18"/><path d="M6 4v4M10 4v4M14 4v4M18 4v4"/><path d="M5 8h2l-1 2zM9 8h2l-1 2zM13 8h2l-1 2zM17 8h2l-1 2z"/><rect x="4" y="13" width="3.5" height="7" rx="1"/><rect x="10.2" y="13" width="3.5" height="7" rx="1"/><rect x="16.5" y="13" width="3.5" height="7" rx="1"/>',
  qc:'<path d="M9 3h6"/><path d="M10 3v6.2L5 18a2 2 0 0 0 1.8 3h10.4A2 2 0 0 0 19 18l-5-8.8V3"/><path d="M7.4 15h9.2"/>',
+ check:'<circle cx="12" cy="12" r="9"/><path d="M7.5 12.3l3 3 6-6.3"/>',
+ cross:'<circle cx="12" cy="12" r="9"/><path d="M8.5 8.5l7 7M15.5 8.5l-7 7"/>',
+ thermo:'<path d="M10 4a2 2 0 0 1 4 0v10.3a4 4 0 1 1-4 0z"/><path d="M12 9v7.5"/>',
  other:'<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M5 19l2-2M17 7l2-2"/>'
 };
 const stCls = {g: "g", a: "a", r: "r", n: "n"};
-function ic(name, st, opt = {}) { return `<span class="ic ${opt.size || ""} ${opt.spin ? "spin" : ""}" aria-hidden="true"><svg viewBox="0 0 24 24">${ICONS[name] || ICONS.other}</svg>${st ? `<span class="bd ${stCls[st]}"></span>` : ""}</span>`; }
+function ic(name, st, opt = {}) { return `<span class="ic ${opt.size || ""} ${opt.spin ? "spin" : ""} ${st ? `t-${stCls[st]}` : ""}" aria-hidden="true"><svg viewBox="0 0 24 24">${ICONS[name] || ICONS.other}</svg>${st ? `<span class="bd ${stCls[st]}"></span>` : ""}</span>`; }
 
 // ---------- state + api ----------
 const S = {user: null, meta: null, d: null, key: null, busy: false, fid: null, admin: null, viewAs: localStorage.getItem("omni_viewas") || "", pvName: localStorage.getItem("omni_viewas_name") || ""};
@@ -128,8 +131,10 @@ const qcCells = b => { const q = lastQc(b); return q ? `<td>${fmt(q.ph, 2)}</td>
 const finishedDay = b => b.status === "moved" ? dayOf(b.moved_at) : (b.status === "passed" || b.status === "rejected") && b.finished_at ? dayOf(b.finished_at) : null;
 function eqState(e) {
   if (openStop(e.id)) return {st: "r", label: "Stopped", spin: false};
-  const b = activeBatch(e.id);
-  if (e.kind === "mixer" && b) return b.status === "passed" ? {st: "a", label: "Waiting to move", spin: false} : {st: "g", label: b.status === "remix" ? "Running · re-mixing" : "Running", spin: true};
+  const tr = sig(e.id, "trip");
+  if (tr && tr.last_value) return {st: "r", label: "Drive fault", spin: false};
+  const b = S.d.batches ? activeBatch(e.id) : null;
+  if (e.kind === "mixer" && b) return b.status === "passed" ? {st: e.status === "running" ? "g" : "n", label: "Passed QC · waiting to move", spin: false} : {st: "g", label: b.status === "remix" ? "Running · re-mixing" : "Running", spin: true};
   if (e.status === "running") return {st: "g", label: "Running", spin: e.kind === "mixer"};
   if (e.status === "idle") return {st: "n", label: "Idle", spin: false};
   return {st: "n", label: "Not connected yet", spin: false};
@@ -236,7 +241,7 @@ function manager() {
   const v = view();
   if (S.user.admin) {
     const link = (k, label, icon) => `<a href="#${k}" class="${k === v ? "on" : ""}" ${k === v ? 'aria-current="page"' : ""}><svg viewBox="0 0 24 24">${icon}</svg><span>${label}</span></a>`;
-    const nOpen = S.admin ? S.admin.support.filter(r => r.status === "open").length : 0;
+    const nOpen = S.admin ? S.admin.support.filter(r => r.status === "open").length + sensorAlerts(S.admin).length : 0;
     const nav = link("support", `Support${nOpen ? ` · ${nOpen}` : ""}`, '<path d="M4 5h16v11H9l-5 4z"/>') + (S.fid ? link("connections", "Connections", ICONS.gateway) : "") + link("admin", "Factories", '<path d="M4 21V9l5 3V9l5 3V5h6v16z"/>');
     if (v === "admin") return shell(nav, "Factories", vAdmin(), "");
     if (v === "connections") return shell(nav, "Connections", vConn(), "");
@@ -286,6 +291,16 @@ function vConn() {
   const pick = fs.length > 1 ? `<section class="card c6"><div class="ch"><span class="ct">${ic("gateway")}Factory</span><span>${fs.map(f => `<button class="btn ${f.id === S.fid ? "" : "ghost"}" type="button" data-act="cf:${f.id}" ${f.id === S.fid ? 'aria-pressed="true"' : ""} style="margin-left:6px">${h(f.name)}</button>`).join("")}</span></div><div class="why">Gateways and signals below belong to ${h(fname())} only.</div></section>` : "";
   return pick + gws + sigs + eng + rd;
 }
+function sensorAlerts(A) {
+  const out = [], lbl = m => (S.meta.metrics[m] || {label: m}).label;
+  A.health.forEach(f => f.gateways.forEach(g => {
+    if (g.last_seen && quiet(g)) { out.push({factory: f.factory.name, name: `${g.name} (gateway)`, since: g.last_seen, icon: "gateway"}); return; }
+    if (!g.last_seen) return;
+    f.signals.filter(x => x.last_at && minsBetween(x.last_at) >= S.meta.quiet_min).forEach(x => { const e = f.equipment.find(y => y.id === x.equipment_id) || {name: "", kind: "other"};
+      out.push({factory: f.factory.name, name: `${e.name} ${lbl(x.metric).toLowerCase()}`, since: x.last_at, icon: e.kind}); });
+  }));
+  return out;
+}
 function vSupport() {
   const A = S.admin; if (!A) return `<section class="card c6"><div class="muted">Loading…</div></section>`;
   const fac = A.health.map(f => { const g = f.gateways, q = g.filter(quiet), last = g.map(x => x.last_seen).filter(Boolean).sort().pop();
@@ -294,7 +309,11 @@ function vSupport() {
     return [`<b style="font-weight:600">${h(f.factory.name)}</b>`, st, sub, ic("gateway", null, {size: "sm"})]; });
   const req = r => [`<b style="font-weight:600">${h(r.factory)}</b>${r.who ? ` · ${h(r.who)}` : ""}<div style="margin-top:4px;white-space:pre-wrap">${h(r.text)}</div>`, r.status === "open" ? `<button class="btn ghost" type="button" data-act="rs:${r.id}">Mark resolved</button>` : `<span class="muted">Resolved ${when(r.resolved_at)}</span>`, `Sent ${when(r.at)}`, ic("person", null, {size: "sm"})];
   const open = A.support.filter(r => r.status === "open"), done = A.support.filter(r => r.status !== "open").slice(0, 20);
-  return `<section class="card c6"><div class="ch"><span class="ct">${ic("person")}Support requests · ${open.length} open</span></div><div class="why">Sent by a factory's site manager or owner with "Request support".</div>${open.length ? rows(open.map(req)) : empty("No open requests.")}${done.length ? `<h4>Resolved</h4>${rows(done.map(req))}` : ""}</section>
+  const down = sensorAlerts(A), lbl = m => (S.meta.metrics[m] || {label: m}).label;
+  const al = down.map(x => [`<b style="font-weight:600">${h(x.factory)}</b> · ${h(x.name)}`, stLine("r", `Disconnected · ${mins(minsBetween(x.since))}`), `Since ${when(x.since)}`, ic(x.icon, "r", {size: "sm"})]);
+  const back = (A.outages || []).slice(0, 10).map(o => [`<b style="font-weight:600">${h(o.factory)}</b> · ${h(o.name || "")}${o.metric ? ` ${h(lbl(o.metric).toLowerCase())}` : ""}`, stLine("g", "Reconnected"), `Off ${mins(minsBetween(o.started_at, o.ended_at))} · back ${when(o.ended_at)}`, ic(o.kind === "gateway" ? "gateway" : "other", null, {size: "sm"})]);
+  return `<section class="card c6"><div class="ch"><span class="ct">${ic("gateway", down.length ? "r" : "g")}Sensor alerts · ${down.length ? `${down.length} disconnected` : "all live"}</span></div>${down.length ? rows(al) : empty("Every connected gateway and sensor is sending data.")}${back.length ? `<h4>Reconnected</h4>${rows(back)}` : ""}</section>
+  <section class="card c6"><div class="ch"><span class="ct">${ic("person")}Support requests · ${open.length} open</span></div><div class="why">Sent by a factory's site manager or owner with "Request support".</div>${open.length ? rows(open.map(req)) : empty("No open requests.")}${done.length ? `<h4>Resolved</h4>${rows(done.map(req))}` : ""}</section>
   <section class="card c6"><div class="ch"><span class="ct">${ic("gateway")}Connection health</span></div><div class="why">Gateways, sensors and drive faults only. Each factory's records and money stay with the factory.</div>${A.health.length ? rows(fac) : empty("No factories yet.")}</section>`;
 }
 function supportD() {
@@ -495,14 +514,25 @@ function drawer(k) {
   if (kind === "batch") {
     const b = S.d.batches.find(x => x.id === n); if (!b) return null; const e = eq(b.equipment_id), q = qcOf(b.id), s = eqState(e);
     const ev = [[hm(b.started_at), "g", `Started on ${h(e.name)}`], ...q.map(x => [hm(x.at), x.result === "pass" ? "g" : x.result === "remix" ? "a" : "r", `QC: pH ${fmt(x.ph, 2)}, ${fmt(x.visc)} cP · ${x.result === "pass" ? "passed" : x.result === "remix" ? `re-mix (${h(x.cause_what)} ${h(x.cause_dir.toLowerCase())})` : "rejected"}${x.note ? ` · ${h(x.note)}` : ""}`]), ...(b.moved_at ? [[hm(b.moved_at), "g", "Moved to holding tank"]] : [])];
-    let body = `${stLine(s.st, {mixing: "Mixing", remix: "Re-mixing", passed: "Passed QC · waiting to move", moved: "Moved to holding tank", rejected: "Rejected"}[b.status])}<h4>Timeline</h4>${tl(ev)}
-      <h4>Readings</h4>${rows([["Material used", b.kg_used != null ? `${fmt(b.kg_used, 1)} kg` : b.s.kg != null ? `${fmt(b.s.kg, 1)} kg` : NR(""), b.kg_used != null ? manual(when(b.kg_at)) + (b.s.kg != null ? `<div class="why">Scale: ${fmt(b.s.kg, 1)} kg</div>` : "") : b.s.kg != null ? sensor(`${b.s.weighings} weighing${b.s.weighings === 1 ? "" : "s"} · ${when(b.s.kg_at)}`) : ""],
-        ["Temperature", b.s.temp ? `${fmt(b.s.temp.last, 1)} °C` : sig(e.id, "temp_c") ? NR("No reading during this batch") : needsConn("Needs a temperature probe"), b.s.temp ? sensor(`${fmt(b.s.temp.lo, 1)}–${fmt(b.s.temp.hi, 1)} °C in this batch · ${when(b.s.temp.at)}`) : ""],
-        ["Motor load", b.s.current ? `${fmt(b.s.current.avg, 0)}% avg` : sig(e.id, "current_pct") ? NR("No reading during this batch") : needsConn("Needs the drive or a current sensor"), b.s.current ? sensor(`max ${fmt(b.s.current.hi, 0)}% of rated current · ${when(b.s.current.at)}`) : ""],
-        ...(sig(e.id, "energy_kwh") ? [["Energy", b.s.kwh != null ? `${fmt(b.s.kwh, 2)} kWh` : NR("Needs 2 readings in this batch"), b.s.kwh != null ? sensor(when(b.s.kwh_at)) : ""]] : [])])}`;
+    const [sc, sl] = {mixing: ["g", "Mixing"], remix: ["g", "Re-mixing"], passed: ["g", "Passed QC"], moved: ["n", "In holding tank"], rejected: ["r", "Rejected"]}[b.status];
+    const last = q[q.length - 1], nRe = q.filter(x => x.result === "remix").length, end = b.moved_at || b.finished_at;
+    const step = (icn, label, tm, st, extra = "") => `<div class="step ${st}">${ic(icn, {now: "g", ok: "g", bad: "r"}[st], {size: "sm", spin: st === "now" && icn === "mixer"})}<b>${label}</b><small>${tm || "&nbsp;"}</small>${extra}</div>`;
+    const steps = [step("mixer", b.status === "remix" ? "Re-mix" : "Mix", hm(b.started_at), ["mixing", "remix"].includes(b.status) ? "now" : "done", nRe ? `<em>×${nRe + 1}</em>` : ""),
+      step("flask", "QC", last ? hm(last.at) : "", !last ? "todo" : last.result === "reject" ? "bad" : "done", last ? `<small>pH ${fmt(last.ph, 1)} · ${fmt(last.visc)} cP</small>` : ""),
+      b.status === "rejected" ? step("cross", "Rejected", last ? hm(last.at) : "", "bad") : step("check", "Passed", ["passed", "moved"].includes(b.status) && last ? hm(last.at) : "", ["passed", "moved"].includes(b.status) ? "ok" : "todo"),
+      ...(b.status === "rejected" ? [] : [step("tank", "Tank", b.moved_at ? hm(b.moved_at) : "", b.moved_at ? "done" : b.status === "passed" ? "now" : "todo")])].join("");
+    const tile = (icn, val, label, off) => `<div class="tile ${off ? "off" : ""}">${ic(icn, null, {size: "sm"})}<b>${val}</b><small>${label}</small></div>`;
+    const kg = b.kg_used != null ? b.kg_used : b.s.kg;
+    const tiles = [tile("scale", kg != null ? `${fmt(kg, 0)} kg` : "—", kg == null ? "Not recorded" : b.kg_used != null ? "Manual" : "Scale", kg == null),
+      tile("thermo", b.s.temp ? `${fmt(b.s.temp.last, 1)} °C` : "—", b.s.temp ? "Sensor" : sig(e.id, "temp_c") ? "No reading" : "Needs connection", !b.s.temp),
+      tile("motor", b.s.current ? `${fmt(b.s.current.avg, 0)}%` : "—", b.s.current ? "Motor load" : sig(e.id, "current_pct") ? "No reading" : "Needs connection", !b.s.current),
+      ...(sig(e.id, "energy_kwh") ? [tile("bolt", b.s.kwh != null ? `${fmt(b.s.kwh, 1)} kWh` : "—", "Energy", b.s.kwh == null)] : [])].join("");
+    let body = `<div class="bst c-${sc}">${sl}</div><div class="bsub">${h(e.name)} · ${mins(minsBetween(b.started_at, end))}</div>
+      <div class="bsteps">${steps}</div><div class="tiles">${tiles}</div>
+      <details class="hist"><summary>History</summary>${tl(ev)}</details>`;
     let after;
     if (!ro && ["mixing", "remix"].includes(b.status)) {
-      body += form("fQc", b.status === "remix" ? "Enter QC again" : "Enter QC readings", h(b.code),
+      body += form("fQc", b.status === "remix" ? "Enter QC again" : "Enter QC readings", "",
         fl(1, "pH", 1) + `<input class="inp" name="ph" inputmode="decimal" placeholder="0–14">` + fl(2, "Viscosity (cP)", 1) + `<input class="inp" name="visc" inputmode="numeric" placeholder="cP from the viscometer">` +
         fl(3, "Result", 1) + chips("result", [["pass", "Passed"], ["remix", "Needs re-mix"], ["reject", "Rejected"]]) +
         `<div id="cause" hidden>${fl(4, "What was out of range", 1)}${chips("cause_what", pairs(["pH", "Viscosity"]))}${fl(5, "Too high or too low", 1)}${chips("cause_dir", pairs(["Too high", "Too low"]))}</div>` +
@@ -515,7 +545,7 @@ function drawer(k) {
     }
     if (!ro && b.status === "passed") body += `<div style="margin-top:14px"><button class="btn full" type="button" data-act="move:${b.id}">Mark as moved to holding tank</button></div>`;
     if (!ro) {
-      body += form("fKg", b.kg_used != null ? "Correct the material used" : "Enter the material used", b.s.kg != null ? "The scale's total is used unless you enter a corrected value." : "Total kg of raw material put into this batch, from the scale.",
+      body += form("fKg", b.kg_used != null ? "Correct the material used" : "Enter the material used", "",
         fl(1, "Material used (kg)", 1) + `<input class="inp" name="kg" inputmode="decimal" placeholder="kg from the scale" value="${b.kg_used != null ? b.kg_used : ""}">`, "Save material used");
       const qcAfter = after;
       after = () => { if (qcAfter) qcAfter(); bind("fKg", f => { const kg = parseFloat(val(f, "kg")); need(kg > 0, "Enter the material used in kg."); return {kg}; }, `/api/batches/${b.id}/kg`, "Material used saved"); };

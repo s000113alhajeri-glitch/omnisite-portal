@@ -196,3 +196,28 @@ table.rec td{padding:10px 6px;border-bottom:1px solid var(--line);vertical-align
 .btn:disabled{opacity:.45;cursor:not-allowed}
 @media (max-width:980px){.side:has(select.fsel){flex-wrap:wrap;row-gap:8px}.side:has(select.fsel) .nav{flex-basis:100%}.side select.fsel{max-width:none;flex:1 1 auto;margin-right:0}}
 .lo.pview{text-decoration:none;color:var(--ink);font-size:12px;font-weight:600;margin-top:4px;display:inline-block;white-space:nowrap}.lo.pname{text-decoration:none;color:var(--ink);font-size:inherit;font-weight:600;text-align:left}.lo.pname:hover{text-decoration:underline}
+
+/* status tiles: running green, off grey, fault red */
+.ic.t-g{background:#e9f7ef;border-color:#bfe6cf;color:#157a45}
+.ic.t-r{background:#fdeeee;border-color:#f2c4c4;color:#b52a2a}
+.ic.t-a{background:#fff6e5;border-color:#f0dcae;color:#8a5a00}
+.active .ic.t-g,.active .ic.t-r,.active .ic.t-a{color:#fff}
+.bst{font-size:22px;font-weight:600}.bst.c-g{color:#157a45}.bst.c-r{color:#b52a2a}
+.bsub{color:var(--mute);font-size:13px;margin-top:2px}
+.bsteps{display:flex;align-items:flex-start;margin:22px 0 16px}
+.bsteps .step{flex:1;text-align:center;position:relative;font-size:12px;min-width:0}
+.bsteps .step:not(:last-child)::after{content:"";position:absolute;top:19px;left:calc(50% + 24px);right:calc(-50% + 24px);height:2px;background:var(--line)}
+.bsteps .step.done:not(:last-child)::after,.bsteps .step.ok:not(:last-child)::after{background:var(--ink)}
+.bsteps .step .ic{margin:0 auto 6px}
+.bsteps .step.todo .ic{opacity:.4}.bsteps .step.todo b{color:var(--mute);font-weight:500}
+.bsteps .step b{display:block;font-weight:600;font-size:12.5px}
+.bsteps .step small{display:block;color:var(--mute);font-family:"IBM Plex Mono",monospace;font-size:11px;margin-top:2px}
+.bsteps .step em{position:absolute;top:-6px;left:calc(50% + 10px);font-style:normal;font-size:10.5px;font-weight:600;background:var(--ink);color:#fff;border-radius:99px;padding:1px 6px}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px}
+.tile{border:1px solid var(--line);border-radius:12px;padding:12px 8px;text-align:center}
+.tile .ic{margin:0 auto 6px}
+.tile b{display:block;font-size:17px;font-weight:600}
+.tile small{display:block;color:var(--mute);font-size:11px;margin-top:2px}
+.tile.off b{color:#bdbdbd}
+details.hist{margin-top:18px}
+details.hist summary{cursor:pointer;font-size:12px;font-weight:600;color:var(--mute);text-transform:uppercase;letter-spacing:.6px}

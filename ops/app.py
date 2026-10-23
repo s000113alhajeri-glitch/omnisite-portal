@@ -81,6 +81,8 @@ CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY, factory_id INTEGER, at
   kind TEXT NOT NULL, text TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS readings_archive(id INTEGER PRIMARY KEY, factory_id INTEGER NOT NULL, equipment_id INTEGER, metric TEXT NOT NULL,
   tag TEXT NOT NULL, at TEXT NOT NULL, value REAL NOT NULL, signal_removed_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS outages(id INTEGER PRIMARY KEY, factory_id INTEGER NOT NULL REFERENCES factories(id), kind TEXT NOT NULL,
+  ref_id INTEGER NOT NULL, started_at TEXT NOT NULL, ended_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS support(id INTEGER PRIMARY KEY, factory_id INTEGER NOT NULL REFERENCES factories(id), user_id INTEGER,
   at TEXT NOT NULL, text TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open', resolved_at TEXT, resolved_by INTEGER);
 """
@@ -337,6 +339,16 @@ def ingest(c, environ, body):
         sg = sigs[tag]
         got.append((t or now(), sg, v * sg["mult"] + sg["plus"]))
     got.sort(key=lambda x: x[0])
+    gap = lambda a, b: a and (dt.datetime.fromisoformat(b) - dt.datetime.fromisoformat(a)).total_seconds() >= QUIET_MIN * 60
+    gw_down = gap(g["last_seen"], now())
+    if gw_down:
+        c.execute("INSERT INTO outages(factory_id,kind,ref_id,started_at,ended_at) VALUES(?,?,?,?,?)", (fid, "gateway", g["id"], g["last_seen"], now()))
+    else:
+        for sid in {sg["id"] for _, sg, _ in got}:
+            first = min(t for t, sg, _ in got if sg["id"] == sid)
+            last = next(sg["last_at"] for _, sg, _ in got if sg["id"] == sid)
+            if gap(last, first):
+                c.execute("INSERT INTO outages(factory_id,kind,ref_id,started_at,ended_at) VALUES(?,?,?,?,?)", (fid, "signal", sid, last, first))
     for t, sg, v in got:
         if c.execute("INSERT OR IGNORE INTO readings(factory_id,signal_id,at,value) VALUES(?,?,?,?)", (fid, sg["id"], t, v)).rowcount:
             saved += 1
@@ -474,6 +486,10 @@ def admin_api(c, method, path, body, user):
                                                          "JOIN users u ON u.id=m.user_id ORDER BY u.name")],
                 "team": [dict(r) for r in c.execute("SELECT id, name, email FROM users WHERE is_admin=1 ORDER BY name")],
                 "support": support_rows(c),
+                "outages": [dict(r) for r in c.execute(
+                    "SELECT o.*, f.name AS factory, COALESCE(g.name, e.name) AS name, s.metric FROM outages o JOIN factories f ON f.id=o.factory_id "
+                    "LEFT JOIN gateways g ON o.kind='gateway' AND g.id=o.ref_id LEFT JOIN signals s ON o.kind='signal' AND s.id=o.ref_id "
+                    "LEFT JOIN equipment e ON e.id=s.equipment_id ORDER BY o.ended_at DESC LIMIT 20")],
                 "health": [{**health(c, f["id"]), "faults": [dict(r) for r in c.execute(
                     "SELECT s.equipment_id, e.name AS equipment, s.last_value AS code, s.last_at FROM signals s JOIN equipment e ON e.id=s.equipment_id "
                     "WHERE s.factory_id=? AND s.metric='trip' AND s.last_value IS NOT NULL AND s.last_value<>0", (f["id"],))]}
