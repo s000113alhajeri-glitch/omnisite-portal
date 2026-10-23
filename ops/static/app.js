@@ -102,9 +102,9 @@ function dailyChart(data) {
   for (let g = 0; g <= max; g += Math.ceil(max / 3)) { const y = H - pad - (g / max) * (H - pad * 2); s += `<line x1="${pad}" x2="${W - 6}" y1="${y}" y2="${y}" stroke="#eee"/><text x="${pad - 8}" y="${y + 4}" font-size="10" fill="#999" text-anchor="end">${g}</text>`; }
   data.forEach((d, i) => { const x = pad + i * step + (step - bw) / 2; let y = H - pad; const cols = ["#111", "#a6a6a6", "url(#hp)"], tot = d.v[0] + d.v[1] + d.v[2], last = i === data.length - 1;
     d.v.forEach((n, k) => { if (!n) return; const hh = n / max * (H - pad * 2); y -= hh; s += `<rect x="${x}" y="${y}" width="${bw}" height="${Math.max(1, hh - 1.5)}" rx="4" fill="${cols[k]}" ${k === 2 ? 'stroke="#c9c9c9"' : ""}/>`; });
-    s += `<text x="${x + bw / 2}" y="${y - 6}" font-size="11" fill="${tot ? "#333" : "#bbb"}" text-anchor="middle" font-weight="600">${tot}</text>`;
+    s += `<text x="${x + bw / 2}" y="${y - 6}" font-size="11" fill="${tot ? "#333" : "#bbb"}" text-anchor="middle" font-weight="600">${tot || hasDay(d.day) ? tot : "–"}</text>`;
     s += `<text x="${x + bw / 2}" y="${H - 8}" font-size="11" fill="${last ? "#111" : "#888"}" text-anchor="middle" ${last ? 'font-weight="600"' : ""}>${last ? "Today" : wd(d.day)}</text>`; });
-  return s + "</svg>";
+  return s + "</svg>" + (data.some(d => hasDay(d.day)) ? "" : `<div class="why">Not recorded yet. A day shows a number once something is entered that day.</div>`);
 }
 const LEGEND = `<div class="lg"><span><span class="sw" style="background:#111"></span>Passed first time</span><span><span class="sw" style="background:#a6a6a6"></span>Re-mixed, then passed</span><span><span class="sw" style="background:repeating-linear-gradient(45deg,#fff 0 2px,#c9c9c9 2px 4px);border:1px solid #c9c9c9"></span>Rejected</span></div>`;
 
@@ -134,6 +134,9 @@ function dayMins(s, day) {  // minutes of stop s that fall on this UAE day
   const st = Math.max(new Date(s.started_at).getTime(), ds), en = Math.min(s.ended_at ? new Date(s.ended_at).getTime() : Date.now(), de);
   return Math.max(0, Math.round((en - st) / 6e4));
 }
+const hasDay = d => S.d.batches.some(b => b.day === d || finishedDay(b) === d) || S.d.qc.some(q => dayOf(q.at) === d) || S.d.stops.some(s => dayOf(s.started_at) === d) || S.d.losses.some(l => l.day === d) || S.d.labour.some(l => l.day === d);
+const NRs = `<span class="nr">Not recorded</span>`;
+const inBatch = s => S.d.batches.some(b => b.equipment_id === s.equipment_id && b.started_at <= (s.ended_at || "9999") && (b.finished_at || "9999") >= s.started_at);
 function week() {
   const days = lastDays(7), set = new Set(days);
   const fin = S.d.batches.filter(b => set.has(finishedDay(b)));
@@ -154,9 +157,10 @@ function week() {
   const n = [0, 0, 0]; fin.forEach(b => n[cls(b)]++);
   const withKg = fin.filter(b => kgOf(b) != null), kgUsed = withKg.reduce((a, b) => a + kgOf(b), 0);
   const timed = S.d.batches.filter(b => b.finished_at && b.status !== "rejected");
+  const batchStopMin = stops.filter(s => eq(s.equipment_id).kind === "mixer" && inBatch(s)).reduce((a, s) => a + sm(s), 0);
   const avgMin = timed.length ? timed.reduce((a, b) => a + minsBetween(b.started_at, b.finished_at), 0) / timed.length : null;
   return {days, daily, fin, n, stops, stopMin, mixerStopMin, reasons, causes, perDay, losses, lossKg, lab, labH, withKg, kgUsed, avgMin,
-    lost: avgMin ? mixerStopMin / avgMin : null,
+    lost: avgMin && timed.length >= 5 ? batchStopMin / avgMin : null, batchStopMin, timedN: timed.length, rec: days.some(hasDay),
     remixes: S.d.qc.filter(q => q.result === "remix" && set.has(dayOf(q.at))).length};
 }
 function money(w) {
@@ -165,9 +169,9 @@ function money(w) {
 }
 function lostLine(min, w) {  // effect of mixer stop minutes, without any prices
   if (!min) return "";
-  if (!w.avgMin) return `<div class="why">Batches not made: needs at least 1 finished batch to estimate</div>`;
+  if (!w.avgMin || w.timedN < 5) return `<div class="why">Batches not made: needs at least 5 finished batches to estimate (${w.timedN} so far)</div>`;
   const n = min / w.avgMin;
-  return `<div class="row" style="margin-top:6px"><span>≈ <b style="font-weight:600">${fmt(n, 1)}</b> batch${fmt(n, 1) === "1" ? "" : "es"} not made</span></div>${est(`${mins(min)} of mixer stops ÷ average batch time ${mins(Math.round(w.avgMin))}`)}`;
+  return `<div class="row" style="margin-top:6px"><span>≈ <b style="font-weight:600">${fmt(n, 1)}</b> batch${fmt(n, 1) === "1" ? "" : "es"} not made</span></div>${est(`${mins(min)} of mixer stops during batches ÷ average batch time ${mins(Math.round(w.avgMin))}`)}`;
 }
 const peopleLine = x => x ? `${x.people ? `${x.people} people × ${fmt(x.hours_each, 2)} h = ` : ""}${fmt(x.hours, 2)} staff-hours` : "";
 const kgToday = () => { const b = S.d.batches.filter(x => finishedDay(x) === S.d.today && kgOf(x) != null); return b.length ? b.reduce((a, x) => a + kgOf(x), 0) : null; };
@@ -281,22 +285,22 @@ function vOverview() {
   const ms = mixers(), running = ms.filter(e => eqState(e).st === "g").length;
   const ft = w.fin.length ? Math.round(w.n[0] / w.fin.length * 100) : null;
   return `<section class="card c3 sum" data-go="batches" tabindex="0" role="link"><div class="ch"><span class="ct">${ic("mixer", null, {size: "lg"})}Batches</span>${go}</div>
-     <div class="big">${t.done} <small>${t.target !== null ? `of ${t.target} batches today` : "batches finished today"}</small></div>
+     <div class="big">${t.done || hasDay(S.d.today) ? t.done : NRs} <small>${t.target !== null ? `of ${t.target} batches today` : "batches finished today"}</small></div>
      <div style="margin-top:10px">${t.target === null ? stLine("n", "Daily target not set") : t.done >= t.target ? stLine("g", "Target reached") : stLine("n", `${t.target - t.done} to go`)}</div>
      <div class="why" style="margin-top:6px">${act.length ? `Now: ${act.map(b => `${h(b.code)} ${{mixing: "mixing", remix: "re-mixing", passed: "waiting to move"}[b.status]}`).join(" · ")}` : "No batch in progress"}${ft !== null ? ` · ${ft}% passed first time this week` : ""}</div>
      <div class="src" style="margin-top:auto;padding-top:12px"><i>✎</i>Manual · ${lastAt(S.d.batches, "moved_at") || "no batch moved yet"}</div></section>
    <section class="card c3 sum" data-go="downtime" tabindex="0" role="link"><div class="ch"><span class="ct">${ic("motor", null, {size: "lg"})}Downtime</span>${go}</div>
-     <div class="big">${w.stops.length ? mins(w.stopMin) : "0 min"} <small>stopped this week</small></div>
+     <div class="big">${w.stops.length ? mins(w.stopMin) : w.rec ? "0 min" : NRs} <small>stopped this week</small></div>
      <div style="margin-top:10px">${stopped.length ? stLine("r", `${stopped.map(e => h(e.name)).join(", ")} stopped now`) : stLine("g", "Nothing stopped now")}</div>
      <div class="why" style="margin-top:6px">${top ? `Top reason: ${h(top[0])}` : w.stops.length ? "Reasons not entered yet" : "No stops recorded this week"}${w.lost ? ` · ≈ ${fmt(w.lost, 1)} batches not made (estimate)` : ""}</div>
      <div class="src" style="margin-top:auto;padding-top:12px">${stopsSrc(lastAt(S.d.stops, "updated_at") || "no stops entered")}</div></section>
    <section class="card c3 sum" data-go="costs" tabindex="0" role="link"><div class="ch"><span class="ct">${ic("coins", null, {size: "lg"})}Costs</span>${go}</div>
-     <div class="big">${m.mat !== null ? `AED ${fmt(m.mat)}` : `${fmt(w.lossKg, 1)} kg`} <small>material lost this week</small></div>
+     <div class="big">${m.mat !== null && w.losses.length ? `AED ${fmt(m.mat)}` : w.losses.length ? `${fmt(w.lossKg, 1)} kg` : NRs} <small>material lost this week</small></div>
      <div style="margin-top:10px">${m.mat === null ? stLine("a", "Material price not set") : stLine("g", "Price set")}</div>
      <div class="why" style="margin-top:6px">Material used: ${w.withKg.length ? `${fmt(w.kgUsed)} kg` : "not recorded"} · Labour: ${w.labH ? `${fmt(w.labH, 1)} staff-hours${m.lab !== null ? ` · AED ${fmt(m.lab)}` : ""}` : "not recorded"}</div>
      <div class="src" style="margin-top:auto;padding-top:12px"><i>✎</i>Manual · ${lastAt(S.d.losses, "at") || "no loss entered"}</div></section>
    <section class="card c3 sum" data-go="equipment" tabindex="0" role="link"><div class="ch"><span class="ct">${ic("other", null, {size: "lg"})}Equipment</span>${go}</div>
-     <div class="big">${running} <small>of ${ms.length} mixer${ms.length === 1 ? "" : "s"} running</small></div>
+     <div class="big">${running || mixers().some(e => e.status_at) ? running : NRs} <small>of ${ms.length} mixer${ms.length === 1 ? "" : "s"} running</small></div>
      <div class="eqmini">${S.d.equipment.slice(0, 6).map(e => { const s = eqState(e); return ic(e.kind, s.st, {spin: s.spin}); }).join("")}</div>
      <div class="why" style="margin-top:6px">${S.d.equipment.slice(0, 4).map(e => `${h(e.name)} ${eqState(e).label.toLowerCase()}`).join(" · ")}</div>
      <div class="src" style="margin-top:auto;padding-top:12px">${(S.d.signals || []).some(x => x.metric === "speed_hz") ? `<i>●</i>Sensor · drive signal${S.d.equipment.some(e => e.status_src !== "sensor") ? ` · <i style="margin-left:6px">✎</i>Manual · other equipment` : ""}` : `<i>✎</i>Manual · status entered by the site manager`}</div></section>`;
@@ -315,7 +319,7 @@ function vBatches() {
   const t = today(), w = week(), act = S.d.batches.filter(b => ["mixing", "remix", "passed"].includes(b.status));
   const idle = mixers().filter(e => !activeBatch(e.id));
   const prodCard = `<section class="card c3" data-open="settings" tabindex="0" role="button"><div class="ch"><span class="ct">${ic("mixer")}Production vs today's target</span><span class="open">Open ›</span></div>
-    <div class="big">${t.done} <small>${t.target !== null ? `of ${t.target} batches` : "batches finished"}</small></div>
+    <div class="big">${t.done || hasDay(S.d.today) ? t.done : NRs} <small>${t.target !== null ? `of ${t.target} batches` : "batches finished"}</small></div>
     ${t.target !== null ? `<div class="bar"><b style="width:${Math.min(100, t.done / t.target * 100)}%"></b></div>` : `<div class="why" style="margin-top:10px">Daily target not set. Tap to set it.</div>`}
     <div class="row"><span class="muted">${t.litres !== null ? `${fmt(t.done * t.litres)} L${t.target !== null ? ` of ${fmt(t.target * t.litres)} L` : ""}` : "Litres per batch not set"}</span></div>
     <div class="src"><i>✎</i>Manual · a batch counts when it is marked moved to the holding tank</div></section>`;
@@ -333,13 +337,13 @@ function vBatches() {
 function dayList(w) {
   const max = Math.max(1, ...w.perDay.map(d => d.m));
   return w.perDay.map(d => { const miss = S.d.stops.some(s => dayOf(s.started_at) === d.day && !s.reason);
-      return `<div class="dayrow" data-open="day:${d.day}" tabindex="0" role="button"><div class="row" style="font-size:13px"><span>${d.day === S.d.today ? "Today" : dm(d.day)}${miss ? ` <span class="st" style="margin-left:6px"><span class="dot r"></span>Reason needed</span>` : ""}</span><b style="font-weight:600">${d.m ? mins(d.m) : "0 min"} <span class="muted" style="font-weight:400">›</span></b></div><div class="bar" style="margin:6px 0 0;height:6px"><b style="width:${d.m / max * 100}%"></b></div></div>`; }).join("")
+      return `<div class="dayrow" data-open="day:${d.day}" tabindex="0" role="button"><div class="row" style="font-size:13px"><span>${d.day === S.d.today ? "Today" : dm(d.day)}${miss ? ` <span class="st" style="margin-left:6px"><span class="dot r"></span>Reason needed</span>` : ""}</span><b style="font-weight:600">${d.m ? mins(d.m) : hasDay(d.day) ? "0 min" : NRs} <span class="muted" style="font-weight:400">›</span></b></div><div class="bar" style="margin:6px 0 0;height:6px"><b style="width:${d.m / max * 100}%"></b></div></div>`; }).join("")
     + `<div class="why" style="margin-top:8px">Tap a day to see its stops${canEdit() ? " or add one" : ""}.</div>`;
 }
 function vDowntime() {
   const w = week();
   return `<section class="card c3"><div class="ch"><span class="ct">${ic("motor")}Downtime by day</span><span class="muted" style="font-size:12px">this week</span></div>
-    <div class="row" style="margin-bottom:10px"><span class="mid">${mins(w.stopMin)}</span></div>${lostLine(w.mixerStopMin, w) ? `<div style="margin:-4px 0 12px">${lostLine(w.mixerStopMin, w)}</div>` : ""}
+    <div class="row" style="margin-bottom:10px"><span class="mid">${w.stops.length || w.rec ? mins(w.stopMin) : NRs}</span></div>${lostLine(w.batchStopMin, w) ? `<div style="margin:-4px 0 12px">${lostLine(w.batchStopMin, w)}</div>` : ""}
     ${dayList(w)}
     <div class="why" style="margin-top:8px">Shift split not shown: shift times are not set.</div><div class="src">${stopsSrc("stops entered by the site manager")}</div></section>
    <section class="card c3"><div class="ch"><span class="ct">${ic("motor")}Why equipment stopped · this week</span></div>${bars(w.reasons, mins)}<div class="src"><i>✎</i>Manual · reasons entered by the site manager</div></section>
@@ -350,20 +354,20 @@ function vCosts() {
   const w = week(), m = money(w), t = S.d.today, lossToday = S.d.losses.filter(l => l.day === t).reduce((a, l) => a + l.kg, 0), p = setn("price_kg");
   const aed = (v, why) => v !== null ? `AED ${fmt(v)}` : NR(why);
   return `<section class="card c3" data-open="loss" tabindex="0" role="button"><div class="ch"><span class="ct">${ic("scale")}Material loss</span><span class="open">Add / open ›</span></div>
-    <div class="big">${fmt(lossToday, 1)} <small>kg today</small></div><div class="src"><i>✎</i>Manual · ${lastAt(S.d.losses.filter(l => l.day === t), "at") || "nothing entered today"}</div><div class="sep"></div>
+    <div class="big">${S.d.losses.some(l => l.day === t) ? fmt(lossToday, 1) : NRs} <small>kg today</small></div><div class="src"><i>✎</i>Manual · ${lastAt(S.d.losses.filter(l => l.day === t), "at") || "nothing entered today"}</div><div class="sep"></div>
     <div class="row"><span class="mid">${p !== null ? `AED ${fmt(lossToday * p)}` : `<span class="nr">Not recorded</span>`}</span><span class="muted" style="font-size:12px">${p !== null ? `AED ${fmt(p, 2)} / kg` : "material price not set"}</span></div>
     ${p !== null ? `<div class="src"><i>≈</i>Estimate · weight × your price</div>` : ""}</section>
    <section class="card c3" data-open="labour" tabindex="0" role="button"><div class="ch"><span class="ct">${ic("person")}Labour · this week</span><span class="open">Add / open ›</span></div>
     <div class="big">${w.labH ? fmt(w.labH, 1) : "—"} <small>staff-hours</small></div><div class="src"><i>✎</i>Manual · ${lastAt(w.lab, "updated_at") || "not entered"}</div><div class="sep"></div>
     <div class="row"><span class="mid">${aed(m.lab, "Labour cost per hour not set")}</span></div><div class="why" style="margin-top:6px">Today: ${peopleLine(S.d.labour.find(l => l.day === S.d.today)) || "not entered"}</div></section>
-   <section class="card c6"><div class="ch"><span class="ct">${ic("scale")}Material used · this week</span><span class="muted" style="font-size:12px">${w.withKg.length} of ${w.fin.length} finished batch${w.fin.length === 1 ? "" : "es"} weighed</span></div>
+   <section class="card c6"><div class="ch"><span class="ct">${ic("scale")}Material used · this week</span><span class="muted" style="font-size:12px">${w.fin.length ? `${w.withKg.length} of ${w.fin.length} finished batch${w.fin.length === 1 ? "" : "es"} weighed` : "no finished batches yet"}</span></div>
     ${rows([["Total used", w.withKg.length ? `${fmt(w.kgUsed, 1)} kg` : NR("Enter it in each batch"), w.withKg.length ? (w.withKg.every(b => b.kg_used == null) ? sensor("from the scale") : w.withKg.some(b => b.kg_used == null) ? manual(lastAt(w.withKg.filter(b => b.kg_used != null), "kg_at")) + sensor("and the scale") : manual(lastAt(w.withKg, "kg_at"))) : ""],
       ["Average per batch", w.withKg.length ? `${fmt(w.kgUsed / w.withKg.length, 1)} kg` : NR(""), ""],
       ["Material cost per batch", w.withKg.length && p !== null ? `AED ${fmt(w.kgUsed / w.withKg.length * p)}` : NR(p === null ? "Set the material price" : ""), w.withKg.length && p !== null ? est("average kg × your price") : ""]])}</section>
    <section class="card c6" data-open="settings" tabindex="0" role="button"><div class="ch"><span class="ct">${ic("coins")}Money lost · this week</span><span class="open">Prices ›</span></div>
-    ${rows([["Material loss", aed(m.mat, "Set the material price"), `${fmt(w.lossKg, 1)} kg weighed` , ic("scale", null, {size: "sm"})],
-      ["Equipment stops", aed(m.down, "Set the cost of 1 hour of stop"), `${mins(w.stopMin)} stopped`, ic("motor", null, {size: "sm"})],
-      ["Re-mixing", NR("Not calculated yet"), `${w.remixes} re-mix${w.remixes === 1 ? "" : "es"} this week`, ic("rework", null, {size: "sm"})]])}
+    ${rows([["Material loss", aed(m.mat, "Set the material price"), (w.losses.length ? `${fmt(w.lossKg, 1)} kg weighed` : "no loss entered") , ic("scale", null, {size: "sm"})],
+      ["Equipment stops", aed(m.down, "Set the cost of 1 hour of stop"), (w.stops.length ? `${mins(w.stopMin)} stopped` : "no stops entered"), ic("motor", null, {size: "sm"})],
+      ["Re-mixing", NR("Not calculated yet"), (w.fin.length || w.remixes ? `${w.remixes} re-mix${w.remixes === 1 ? "" : "es"} this week` : "no QC entered"), ic("rework", null, {size: "sm"})]])}
     <div class="why" style="margin-top:10px">Totals only include values that are recorded.</div></section>`;
 }
 function vEquipment() {
@@ -393,18 +397,18 @@ function owner() {
    <div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px"><span class="ro">View only · the site manager enters reasons and readings</span><div class="muted" style="font-size:12px">${h(S.user.name)} · <button class="lo" type="button" onclick="logout()" style="background:none;border:0;padding:0;text-decoration:underline;cursor:pointer;font:inherit;color:var(--ink2)">Log out</button></div></div></div>
    <section class="card" style="margin-bottom:20px"><div class="hero"><div class="light"><span class="bulb ${light.c}"></span><div><div style="margin-bottom:4px">${stLine(light.c, light.label)}</div><h2>${light.line}</h2>${light.sub ? `<div class="muted" style="margin-top:6px">${light.sub}</div>` : ""}${light.src || ""}</div></div>${tiles}</div></section>
    <div class="grid">
-    <section class="card c2 half"><div class="ch"><span class="ct">${ic("mixer")}Output today</span></div><div class="big">${t.done} <small>${t.target !== null ? `of ${t.target} batches` : "batches finished"}</small></div>
+    <section class="card c2 half"><div class="ch"><span class="ct">${ic("mixer")}Output today</span></div><div class="big">${t.done || hasDay(S.d.today) ? t.done : NRs} <small>${t.target !== null ? `of ${t.target} batches` : "batches finished"}</small></div>
       ${t.target !== null ? `<div class="bar"><b style="width:${Math.min(100, t.done / t.target * 100)}%"></b></div>` : `<div class="why" style="margin-top:10px">Daily target not set</div>`}
       <div class="muted">${t.litres !== null ? `${fmt(t.done * t.litres)} L` : ""}</div>
       <div class="why" style="margin-top:8px">Material used today: ${kgToday() !== null ? `${fmt(kgToday(), 1)} kg` : "not recorded"} · People today: ${(S.d.labour.find(l => l.day === S.d.today) || {}).people || "not recorded"}</div><div class="src"><i>✎</i>Manual · ${lastAt(S.d.batches, "moved_at") || "no batch moved yet"}</div></section>
     <section class="card c2 half" data-open="o-quality" tabindex="0" role="button"><div class="ch"><span class="ct">${ic("qc")}Quality · this week</span><span class="open">Open ›</span></div>
       <div class="big">${ft !== null ? `${ft}%` : "—"} <small>${ft !== null ? "passed first time" : "no finished batches yet"}</small></div>
-      <div class="lg" style="margin-top:14px"><span>${w.n[0]} first time</span><span>${w.n[1]} re-mixed</span><span>${w.n[2]} rejected</span></div><div class="src"><i>✎</i>Manual · QC results</div></section>
+      ${w.fin.length ? `<div class="lg" style="margin-top:14px"><span>${w.n[0]} first time</span><span>${w.n[1]} re-mixed</span><span>${w.n[2]} rejected</span></div>` : ""}<div class="src"><i>✎</i>Manual · QC results</div></section>
     <section class="card c2"><div class="ch"><span class="ct">${ic("coins")}Money lost · this week</span></div>
       <div class="big">${parts ? `AED ${fmt(total)}` : `<span class="nr">Not recorded</span>`}</div><div class="why" style="margin-top:4px">${parts < 2 ? "Incomplete: some prices are not set yet" : "Material loss + equipment stops"}</div>
-      ${rows([["Material loss", m.mat !== null ? `AED ${fmt(m.mat)}` : `<span class="nr">Not recorded</span>`, `${fmt(w.lossKg, 1)} kg weighed`, ic("scale", null, {size: "sm"})], ["Equipment stops", m.down !== null ? `AED ${fmt(m.down)}` : `<span class="nr">Not recorded</span>`, mins(w.stopMin), ic("motor", null, {size: "sm"})], ["Re-mixing", `<span class="nr">Not recorded</span>`, `${w.remixes} re-mix${w.remixes === 1 ? "" : "es"}`, ic("rework", null, {size: "sm"})]])}</section>
-    <section class="card c3"><div class="ch"><span class="ct">${ic("motor")}Why equipment stopped · this week</span></div><div class="row"><span class="mid">${mins(w.stopMin)}</span><span class="muted" style="font-size:12px">total stopped</span></div>${lostLine(w.mixerStopMin, w)}${bars(w.reasons, mins)}<div class="src"><i>✎</i>Manual · reasons from the site manager</div></section>
-    <section class="card c3"><div class="ch"><span class="ct">${ic("rework")}Why batches were re-mixed · this week</span></div><div class="row"><span class="mid">${w.remixes}</span><span class="muted" style="font-size:12px">re-mixes</span></div>${bars(w.causes, v => String(v))}<div class="src"><i>✎</i>Manual · QC causes from the site manager</div></section>
+      ${rows([["Material loss", m.mat !== null ? `AED ${fmt(m.mat)}` : `<span class="nr">Not recorded</span>`, (w.losses.length ? `${fmt(w.lossKg, 1)} kg weighed` : "no loss entered"), ic("scale", null, {size: "sm"})], ["Equipment stops", m.down !== null ? `AED ${fmt(m.down)}` : `<span class="nr">Not recorded</span>`, w.stops.length ? mins(w.stopMin) : "no stops entered", ic("motor", null, {size: "sm"})], ["Re-mixing", `<span class="nr">Not recorded</span>`, (w.fin.length || w.remixes ? `${w.remixes} re-mix${w.remixes === 1 ? "" : "es"}` : "no QC entered"), ic("rework", null, {size: "sm"})]])}</section>
+    <section class="card c3"><div class="ch"><span class="ct">${ic("motor")}Why equipment stopped · this week</span></div><div class="row"><span class="mid">${w.stops.length || w.rec ? mins(w.stopMin) : NRs}</span><span class="muted" style="font-size:12px">total stopped</span></div>${lostLine(w.batchStopMin, w)}${bars(w.reasons, mins)}<div class="src"><i>✎</i>Manual · reasons from the site manager</div></section>
+    <section class="card c3"><div class="ch"><span class="ct">${ic("rework")}Why batches were re-mixed · this week</span></div><div class="row"><span class="mid">${w.remixes || w.rec ? w.remixes : NRs}</span><span class="muted" style="font-size:12px">re-mixes</span></div>${bars(w.causes, v => String(v))}<div class="src"><i>✎</i>Manual · QC causes from the site manager</div></section>
     <section class="card c3"><div class="ch"><span class="ct">${ic("tank")}Batches finished · last 7 days</span></div>${dailyChart(w.daily)}${LEGEND}<div class="src"><i>✎</i>Manual · QC results</div></section>
     <section class="card c3"><div class="ch"><span class="ct">${ic("motor")}Downtime by day</span><span class="muted" style="font-size:12px">this week</span></div>${dayList(w)}<div class="src">${stopsSrc("stops entered by the site manager")}</div></section>
    </div></div>`;
@@ -456,7 +460,7 @@ function drawer(k) {
     let after;
     if (!ro && ["mixing", "remix"].includes(b.status)) {
       body += form("fQc", b.status === "remix" ? "Enter QC again" : "Enter QC readings", h(b.code),
-        fl(1, "pH", 1) + `<input class="inp" name="ph" inputmode="decimal" placeholder="0–14">` + fl(2, "Viscosity (cP)", 1) + `<input class="inp" name="visc" inputmode="numeric" placeholder="e.g. 2400">` +
+        fl(1, "pH", 1) + `<input class="inp" name="ph" inputmode="decimal" placeholder="0–14">` + fl(2, "Viscosity (cP)", 1) + `<input class="inp" name="visc" inputmode="numeric" placeholder="cP from the viscometer">` +
         fl(3, "Result", 1) + chips("result", [["pass", "Passed"], ["remix", "Needs re-mix"], ["reject", "Rejected"]]) +
         `<div id="cause" hidden>${fl(4, "What was out of range", 1)}${chips("cause_what", pairs(["pH", "Viscosity"]))}${fl(5, "Too high or too low", 1)}${chips("cause_dir", pairs(["Too high", "Too low"]))}</div>` +
         `<div class="fl">Note <span class="opt">(optional)</span></div>` + `<textarea class="inp" name="note"></textarea>`, "Save QC readings");
@@ -480,7 +484,7 @@ function drawer(k) {
     let body = `${s.ended_at ? stLine("n", `Restarted · stopped for ${mins(minsBetween(s.started_at, s.ended_at))}`) : stLine("r", `Stopped · ${mins(minsBetween(s.started_at))}`)}
       ${tl([[hm(s.started_at), "r", `${h(e.name)} stopped`], ...(s.ended_at ? [[hm(s.ended_at), "g", "Restarted"]] : [])])}
       <h4>Reason</h4>${rows([["Reason", s.reason ? h(s.reason) : `<span class="nr">Not entered</span>`, s.reason ? manual(when(s.updated_at)) : ""], ...(s.note ? [["Note", h(s.note), ""]] : [])])}
-      ${e.kind === "mixer" ? `<h4>Effect</h4>${lostLine(minsBetween(s.started_at, s.ended_at), week()) || `<div class="why">Less than 1 minute</div>`}` : ""}`;
+      ${e.kind === "mixer" ? `<h4>Effect</h4>${!inBatch(s) ? `<div class="why">No batch was running on this mixer, so no batch was lost.</div>` : lostLine(minsBetween(s.started_at, s.ended_at), week()) || `<div class="why">Less than 1 minute</div>`}` : ""}`;
     let after;
     if (!ro) {
       body += form("fStop", s.reason ? "Change the reason" : "Add the stop reason", "Shown to the owner in “Why equipment stopped”.",
@@ -504,7 +508,7 @@ function drawer(k) {
   }
   if (kind === "day") {
     const day = id, list = S.d.stops.filter(s => dayOf(s.started_at) === day || dayMins(s, day) > 0), tot = list.reduce((a, s) => a + dayMins(s, day), 0);
-    let body = `<div class="big">${mins(tot)} <small>stopped</small></div>` + (list.length ? `<h4>Stops</h4>` + rows(list.map(s => [`${h(eq(s.equipment_id).name)} · ${hm(s.started_at)}${s.ended_at ? `–${hm(s.ended_at)}` : " · still stopped"}`, s.reason ? h(s.reason) : `<span class="st"><span class="dot r"></span>Reason needed</span>`, manual(dayMins(s, day) === minsBetween(s.started_at, s.ended_at) ? mins(dayMins(s, day)) : `${mins(dayMins(s, day))} on this day · ${mins(minsBetween(s.started_at, s.ended_at))} in total`), ic(eq(s.equipment_id).kind, s.ended_at ? null : "r", {size: "sm"}), `stop:${s.id}`])) : empty("No stops recorded on this day."));
+    let body = `<div class="big">${list.length || hasDay(day) ? mins(tot) : NRs} <small>stopped</small></div>` + (list.length ? `<h4>Stops</h4>` + rows(list.map(s => [`${h(eq(s.equipment_id).name)} · ${hm(s.started_at)}${s.ended_at ? `–${hm(s.ended_at)}` : " · still stopped"}`, s.reason ? h(s.reason) : `<span class="st"><span class="dot r"></span>Reason needed</span>`, manual(dayMins(s, day) === minsBetween(s.started_at, s.ended_at) ? mins(dayMins(s, day)) : `${mins(dayMins(s, day))} on this day · ${mins(minsBetween(s.started_at, s.ended_at))} in total`), ic(eq(s.equipment_id).kind, s.ended_at ? null : "r", {size: "sm"}), `stop:${s.id}`])) : empty("No stops recorded on this day."));
     let after;
     if (!ro && S.d.equipment.length) { body += stopForm("fPast", `Add a stop on ${day === S.d.today ? "today" : dm(day)}`); after = () => bindStop("fPast", day); }
     return {icon: ic("motor"), kicker: "Downtime", title: day === S.d.today ? "Today" : dm(day), body, after};
