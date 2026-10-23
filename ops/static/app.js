@@ -250,14 +250,14 @@ function manager() {
   const nav = Object.keys(VIEWS).map(k => `<a href="#${k}" data-v="${k}" class="${k === v ? "on" : ""}" ${k === v ? 'aria-current="page"' : ""}><svg viewBox="0 0 24 24">${NAV_IC[k]}</svg><span>${k === "overview" ? "Overview" : VIEWS[k]}</span></a>`).join("");
   const body = !S.d.equipment.length && v !== "equipment" ? setupCard() : {overview: vOverview, batches: vBatches, downtime: vDowntime, costs: vCosts, equipment: vEquipment}[v]();
   const rail = v === "overview" && S.d.equipment.length ? railHtml() : "";
-  return shell(nav, VIEWS[v], body, rail);
+  return shell(nav, VIEWS[v], body, rail, v === "overview" && S.d.equipment.length ? nowStrip() : "");
 }
-function shell(nav, title, body, rail) {
+function shell(nav, title, body, rail, pre = "") {
   const who = S.user.admin ? "OmniSite team" : "Site manager";
   return `<div class="app"><aside class="side"><div class="brand">OmniSite<small>${[who, fname() && (!S.user.admin || title === "Connections") ? h(fname()) : ""].filter(Boolean).join(" · ")}</small></div>${switcher()}<nav class="nav">${nav}</nav>
    <div class="foot">${S.user.admin ? "" : `<button class="lo" type="button" data-open="support">Request support</button><br>`}${h(S.user.name)}<br><button class="lo" type="button" onclick="logout()">Log out</button></div></aside>
    <main>${pvBar()}<div class="top"><div><h1>${title}</h1><div class="sub">${nowLine()}</div></div><div><div class="mwho">${S.user.admin ? "" : `<button class="lo" type="button" data-open="support">Request support</button> · `}${h(S.user.name)} · <button class="lo" type="button" onclick="logout()">Log out</button></div>${S.user.admin ? "" : LEG()}</div></div>
-   <div class="layout ${rail ? "" : "solo"}"><div class="grid">${body}</div>${rail}</div></main></div>`;
+   ${pre}<div class="layout ${rail ? "" : "solo"}"><div class="grid">${body}</div>${rail}</div></main></div>`;
 }
 function vAdmin() {
   const A = S.admin; if (!A) return `<section class="card c6"><div class="muted">Loading…</div></section>`;
@@ -336,6 +336,16 @@ function railHtml() {
   const al = alerts(), ac = actions();
   return `<aside class="rail"><div><h2>Alerts <span class="count">${al.length}</span></h2>${al.map(alertCard).join("") || empty("No alerts. No equipment is stopped.")}</div>
    <div><h2>Needs action <span class="count">${ac.length}</span></h2>${ac.map(actCard).join("") || empty("Nothing needs action right now.")}</div></aside>`;
+}
+function nowStrip() {
+  const STEP = {mixing: "mixing", remix: "re-mixing", passed: "waiting to move to the holding tank"};
+  const tiles = S.d.equipment.map(e => { const s = eqState(e), b = activeBatch(e.id), st = openStop(e.id);
+    const what = st ? `${st.reason ? `Reason: ${h(st.reason)}` : `<span class="nr">Reason not entered yet</span>`}<div class="why">Stopped for <span data-since="${st.started_at}">${clock(nowMs() - new Date(st.started_at))}</span></div>`
+      : b ? `<span style="font-weight:600">${h(b.code)}</span> · ${STEP[b.status]}<div class="why">Since start <span data-since="${b.started_at}">${clock(nowMs() - new Date(b.started_at))}</span></div>`
+      : `<div class="why">${e.status_at ? "No batch on it now" : "Nothing received yet"}</div>`;
+    const src = st ? srcOf(st, when(st.started_at)) : e.status_at ? (e.status_src === "sensor" ? sensor : manual)(when(e.status_at)) : "";
+    return `<div class="mtile now ${s.st}" data-open="${st ? `stop:${st.id}` : `eq:${e.id}`}" tabindex="0" role="button">${ic(e.kind, s.st, {size: "lg", spin: s.spin})}<div style="min-width:0"><b>${h(e.name)}</b>${stLine(s.st, s.label)}<div style="margin-top:6px;font-size:13px">${what}</div>${src}</div></div>`; }).join("");
+  return `<section class="card c6 nowcard"><div class="ch"><span class="ct">${ic("bolt")}Now · ${hm(new Date().toISOString())}</span><span class="muted" style="font-size:12px">${!(S.d.signals || []).length ? "sensors not connected yet · from the site manager's entries" : (S.d.gateways || []).some(quiet) ? `<span style="color:var(--amber)">sensors not sending data · last ${when((S.d.gateways || []).map(g => g.last_seen).filter(Boolean).sort().pop() || "")}</span>` : "live from the sensors"}</span></div><div class="nowgrid">${tiles}</div></section>`;
 }
 function vOverview() {
   const t = today(), w = week(), m = money(w), go = '<span class="open">View details ›</span>';
