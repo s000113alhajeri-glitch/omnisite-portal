@@ -106,6 +106,17 @@ class Journey(unittest.TestCase):
         self.post("/api/labour", {"hours": 24})
         self.post("/api/labour", {"hours": 30})
         self.assertEqual([l["hours"] for l in self.state()["labour"]], [30])
+        self.post("/api/labour", {"people": 3, "hours_each": 8})
+        self.assertEqual([(l["people"], l["hours_each"], l["hours"]) for l in self.state()["labour"]], [(3, 8, 24)])
+        self.post("/api/labour", {"people": 2.5, "hours_each": 8}, code=400)
+        self.post("/api/labour", {"people": 3}, code=400)
+        self.post("/api/labour", {"people": 3, "hours_each": 8}, self.o, 403)
+        bid = self.state()["batches"][0]["id"]
+        self.post(f"/api/batches/{bid}/kg", {"kg": 0}, code=400)
+        self.post(f"/api/batches/{bid}/kg", {"kg": 950})
+        self.post(f"/api/batches/{bid}/kg", {"kg": 980})  # corrected, not duplicated
+        self.assertEqual(self.state()["batches"][0]["kg_used"], 980)
+        self.post(f"/api/batches/{bid}/kg", {"kg": 900}, self.o, 403)
         self.assertEqual(self.state(self.o)["batches"][0]["code"], code)  # owner sees the same records
         self.assertEqual(self.state(self.a)["batches"][0]["code"], code)  # OmniSite team sees every factory
         with app.db() as c:  # a batch started 20 days ago but finished today still counts

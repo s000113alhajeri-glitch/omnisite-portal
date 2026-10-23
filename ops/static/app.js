@@ -143,13 +143,25 @@ function week() {
   const losses = S.d.losses.filter(l => set.has(l.day)), lossKg = losses.reduce((a, l) => a + l.kg, 0);
   const lab = S.d.labour.filter(l => set.has(l.day)), labH = lab.reduce((a, l) => a + l.hours, 0);
   const n = [0, 0, 0]; fin.forEach(b => n[cls(b)]++);
-  return {days, daily, fin, n, stops, stopMin, mixerStopMin, reasons, causes, perDay, losses, lossKg, lab, labH,
+  const withKg = fin.filter(b => b.kg_used != null), kgUsed = withKg.reduce((a, b) => a + b.kg_used, 0);
+  const timed = S.d.batches.filter(b => b.finished_at && b.status !== "rejected");
+  const avgMin = timed.length ? timed.reduce((a, b) => a + minsBetween(b.started_at, b.finished_at), 0) / timed.length : null;
+  return {days, daily, fin, n, stops, stopMin, mixerStopMin, reasons, causes, perDay, losses, lossKg, lab, labH, withKg, kgUsed, avgMin,
+    lost: avgMin ? mixerStopMin / avgMin : null,
     remixes: S.d.qc.filter(q => q.result === "remix" && set.has(dayOf(q.at))).length};
 }
 function money(w) {
   const p = setn("price_kg"), sc = setn("stop_cost_h"), lr = setn("labour_rate");
   return {mat: p !== null ? w.lossKg * p : null, down: sc !== null ? w.mixerStopMin / 60 * sc : null, lab: lr !== null ? w.labH * lr : null};
 }
+function lostLine(min, w) {  // effect of mixer stop minutes, without any prices
+  if (!min) return "";
+  if (!w.avgMin) return `<div class="why">Batches not made: needs at least 1 finished batch to estimate</div>`;
+  const n = min / w.avgMin;
+  return `<div class="row" style="margin-top:6px"><span>≈ <b style="font-weight:600">${fmt(n, 1)}</b> batch${fmt(n, 1) === "1" ? "" : "es"} not made</span></div>${est(`${mins(min)} of mixer stops ÷ average batch time ${mins(Math.round(w.avgMin))}`)}`;
+}
+const peopleLine = x => x ? `${x.people ? `${x.people} people × ${fmt(x.hours_each, 2)} h = ` : ""}${fmt(x.hours, 2)} staff-hours` : "";
+const kgToday = () => { const b = S.d.batches.filter(x => finishedDay(x) === S.d.today && x.kg_used != null); return b.length ? b.reduce((a, x) => a + x.kg_used, 0) : null; };
 function lastAt(list, key) { const t = list.map(x => x[key]).filter(Boolean).sort().pop(); return t ? when(t) : null; }
 
 // ---------- alerts + actions ----------
@@ -170,7 +182,8 @@ function actions() {
     else if (b.status === "remix") out.push({c: "amber", open: `batch:${b.id}`, icon: ic("qc", "a"), code: h(b.code), tag: stLine("a", "Re-mixing"), d: `${h(e.name)} · enter QC again when the re-mix is done.`, src: manual(`QC ${when(qcOf(b.id).slice(-1)[0].at)}`), btn: "Enter QC again"});
     else out.push({c: "grey", open: `batch:${b.id}`, icon: ic("qc", "n"), code: h(b.code), tag: stLine("n", "Mixing"), d: `${h(e.name)} · enter the QC readings (pH, viscosity) when checked.`, src: manual(`started ${when(b.started_at)}`), btn: "Enter QC readings", ghost: true});
   });
-  if (S.d.equipment.length && !S.d.labour.find(l => l.day === S.d.today)) out.push({c: "grey", open: "labour", icon: ic("person", "n"), code: "Labour today", tag: stLine("n", "Missing info"), d: "Enter today's staff-hours so labour can be counted.", src: "", btn: "Enter labour", ghost: true});
+  S.d.batches.filter(b => finishedDay(b) === S.d.today && b.kg_used == null).forEach(b => out.push({c: "grey", open: `batch:${b.id}`, icon: ic("scale", "n"), code: h(b.code), tag: stLine("n", "Missing info"), d: "Enter the kg of material used for this batch.", src: "", btn: "Enter kg used", ghost: true}));
+  if (S.d.equipment.length && !S.d.labour.find(l => l.day === S.d.today)) out.push({c: "grey", open: "labour", icon: ic("person", "n"), code: "Labour today", tag: stLine("n", "Missing info"), d: "Enter how many people worked today and their hours.", src: "", btn: "Enter labour", ghost: true});
   if (S.d.equipment.length && setn("target_batches") === null) out.push({c: "grey", open: "settings", icon: ic("mixer", "n"), code: "Daily target", tag: stLine("n", "Not set"), d: "Set how many batches are planned per day.", src: "", btn: "Set target", ghost: true});
   return out;
 }
@@ -240,12 +253,12 @@ function vOverview() {
    <section class="card c3 sum" data-go="downtime" tabindex="0" role="link"><div class="ch"><span class="ct">${ic("motor", null, {size: "lg"})}Downtime</span>${go}</div>
      <div class="big">${w.stops.length ? mins(w.stopMin) : "0 min"} <small>stopped this week</small></div>
      <div style="margin-top:10px">${stopped.length ? stLine("r", `${stopped.map(e => h(e.name)).join(", ")} stopped now`) : stLine("g", "Nothing stopped now")}</div>
-     <div class="why" style="margin-top:6px">${top ? `Top reason: ${h(top[0])}` : w.stops.length ? "Reasons not entered yet" : "No stops recorded this week"}</div>
+     <div class="why" style="margin-top:6px">${top ? `Top reason: ${h(top[0])}` : w.stops.length ? "Reasons not entered yet" : "No stops recorded this week"}${w.lost ? ` · ≈ ${fmt(w.lost, 1)} batches not made (estimate)` : ""}</div>
      <div class="src" style="margin-top:auto;padding-top:12px"><i>✎</i>Manual · ${lastAt(S.d.stops, "updated_at") || "no stops entered"}</div></section>
    <section class="card c3 sum" data-go="costs" tabindex="0" role="link"><div class="ch"><span class="ct">${ic("coins", null, {size: "lg"})}Costs</span>${go}</div>
      <div class="big">${m.mat !== null ? `AED ${fmt(m.mat)}` : `${fmt(w.lossKg, 1)} kg`} <small>material lost this week</small></div>
      <div style="margin-top:10px">${m.mat === null ? stLine("a", "Material price not set") : stLine("g", "Price set")}</div>
-     <div class="why" style="margin-top:6px">Labour this week: ${w.labH ? `${fmt(w.labH, 1)} staff-hours${m.lab !== null ? ` · AED ${fmt(m.lab)}` : ""}` : "not recorded"}</div>
+     <div class="why" style="margin-top:6px">Material used: ${w.withKg.length ? `${fmt(w.kgUsed)} kg` : "not recorded"} · Labour: ${w.labH ? `${fmt(w.labH, 1)} staff-hours${m.lab !== null ? ` · AED ${fmt(m.lab)}` : ""}` : "not recorded"}</div>
      <div class="src" style="margin-top:auto;padding-top:12px"><i>✎</i>Manual · ${lastAt(S.d.losses, "at") || "no loss entered"}</div></section>
    <section class="card c3 sum" data-go="equipment" tabindex="0" role="link"><div class="ch"><span class="ct">${ic("other", null, {size: "lg"})}Equipment</span>${go}</div>
      <div class="big">${running} <small>of ${ms.length} mixer${ms.length === 1 ? "" : "s"} running</small></div>
@@ -279,7 +292,7 @@ function vBatches() {
    `<section class="card c3" tabindex="0"><div class="ch"><span class="ct">${ic("qc")}Batches finished · last 7 days</span></div>${dailyChart(w.daily)}${LEGEND}<div class="src"><i>✎</i>Manual · QC results</div></section>
     <section class="card c3"><div class="ch"><span class="ct">${ic("rework")}Why batches were re-mixed · this week</span></div>${bars(w.causes, v => String(v))}<div class="src"><i>✎</i>Manual · causes entered at QC</div></section>
     <section class="card c6"><div class="ch"><span class="ct">${ic("tank")}Batch records · last 14 days</span></div>
-    ${recent.length ? `<table class="rec"><thead><tr><th>Batch</th><th>Mixer</th><th>Result</th><th class="hidem">Time to finish</th><th>Finished</th></tr></thead><tbody>${recent.map(b => `<tr data-open="batch:${b.id}" tabindex="0"><td class="mono">${h(b.code)}</td><td>${h(eq(b.equipment_id).name)}</td><td>${b.status === "rejected" ? stLine("r", "Rejected") : b.qc_count > 1 ? stLine("a", `Re-mixed ×${b.qc_count - 1}`) : stLine("g", "Passed first time")}</td><td class="hidem">${b.finished_at ? mins(minsBetween(b.started_at, b.finished_at)) : "—"}</td><td>${b.moved_at ? when(b.moved_at) : b.finished_at ? when(b.finished_at) : "—"}</td></tr>`).join("")}</tbody></table>` : empty("No finished batches yet.")}
+    ${recent.length ? `<table class="rec"><thead><tr><th>Batch</th><th>Mixer</th><th>Result</th><th class="hidem">Time to finish</th><th class="hidem">Material used</th><th>Finished</th></tr></thead><tbody>${recent.map(b => `<tr data-open="batch:${b.id}" tabindex="0"><td class="mono">${h(b.code)}</td><td>${h(eq(b.equipment_id).name)}</td><td>${b.status === "rejected" ? stLine("r", "Rejected") : b.qc_count > 1 ? stLine("a", `Re-mixed ×${b.qc_count - 1}`) : stLine("g", "Passed first time")}</td><td class="hidem">${b.finished_at ? mins(minsBetween(b.started_at, b.finished_at)) : "—"}</td><td class="hidem">${b.kg_used != null ? `${fmt(b.kg_used, 1)} kg` : `<span class="nr">Not recorded</span>`}</td><td>${b.moved_at ? when(b.moved_at) : b.finished_at ? when(b.finished_at) : "—"}</td></tr>`).join("")}</tbody></table>` : empty("No finished batches yet.")}
     <div class="src"><i>✎</i>Manual · QC entries</div></section>`;
 }
 function dayList(w) {
@@ -291,7 +304,7 @@ function dayList(w) {
 function vDowntime() {
   const w = week();
   return `<section class="card c3"><div class="ch"><span class="ct">${ic("motor")}Downtime by day</span><span class="muted" style="font-size:12px">this week</span></div>
-    <div class="row" style="margin-bottom:10px"><span class="mid">${mins(w.stopMin)}</span></div>
+    <div class="row" style="margin-bottom:10px"><span class="mid">${mins(w.stopMin)}</span></div>${lostLine(w.mixerStopMin, w) ? `<div style="margin:-4px 0 12px">${lostLine(w.mixerStopMin, w)}</div>` : ""}
     ${dayList(w)}
     <div class="why" style="margin-top:8px">Shift split not shown: shift times are not set.</div><div class="src"><i>✎</i>Manual · stops entered by the site manager</div></section>
    <section class="card c3"><div class="ch"><span class="ct">${ic("motor")}Why equipment stopped · this week</span></div>${bars(w.reasons, mins)}<div class="src"><i>✎</i>Manual · reasons entered by the site manager</div></section>
@@ -307,12 +320,16 @@ function vCosts() {
     ${p !== null ? `<div class="src"><i>≈</i>Estimate · weight × your price</div>` : ""}</section>
    <section class="card c3" data-open="labour" tabindex="0" role="button"><div class="ch"><span class="ct">${ic("person")}Labour · this week</span><span class="open">Add / open ›</span></div>
     <div class="big">${w.labH ? fmt(w.labH, 1) : "—"} <small>staff-hours</small></div><div class="src"><i>✎</i>Manual · ${lastAt(w.lab, "updated_at") || "not entered"}</div><div class="sep"></div>
-    <div class="row"><span class="mid">${aed(m.lab, "Labour cost per hour not set")}</span></div></section>
+    <div class="row"><span class="mid">${aed(m.lab, "Labour cost per hour not set")}</span></div><div class="why" style="margin-top:6px">Today: ${peopleLine(S.d.labour.find(l => l.day === S.d.today)) || "not entered"}</div></section>
+   <section class="card c6"><div class="ch"><span class="ct">${ic("scale")}Material used · this week</span><span class="muted" style="font-size:12px">${w.withKg.length} of ${w.fin.length} finished batch${w.fin.length === 1 ? "" : "es"} weighed</span></div>
+    ${rows([["Total used", w.withKg.length ? `${fmt(w.kgUsed, 1)} kg` : NR("Enter it in each batch"), w.withKg.length ? manual(lastAt(w.withKg, "kg_at")) : ""],
+      ["Average per batch", w.withKg.length ? `${fmt(w.kgUsed / w.withKg.length, 1)} kg` : NR(""), ""],
+      ["Material cost per batch", w.withKg.length && p !== null ? `AED ${fmt(w.kgUsed / w.withKg.length * p)}` : NR(p === null ? "Set the material price" : ""), w.withKg.length && p !== null ? est("average kg × your price") : ""]])}</section>
    <section class="card c6" data-open="settings" tabindex="0" role="button"><div class="ch"><span class="ct">${ic("coins")}Money lost · this week</span><span class="open">Prices ›</span></div>
     ${rows([["Material loss", aed(m.mat, "Set the material price"), `${fmt(w.lossKg, 1)} kg weighed` , ic("scale", null, {size: "sm"})],
       ["Equipment stops", aed(m.down, "Set the cost of 1 hour of stop"), `${mins(w.stopMin)} stopped`, ic("motor", null, {size: "sm"})],
       ["Re-mixing", NR("Not calculated yet"), `${w.remixes} re-mix${w.remixes === 1 ? "" : "es"} this week`, ic("rework", null, {size: "sm"})]])}
-    <div class="why" style="margin-top:10px">Totals only include values that are recorded. Cost per batch needs material use per batch, which is not recorded yet.</div></section>`;
+    <div class="why" style="margin-top:10px">Totals only include values that are recorded.</div></section>`;
 }
 function vEquipment() {
   return `<section class="card c6 eq"><div class="ch"><span class="ct">Equipment</span><button class="btn ghost" type="button" data-open="addEq">Add equipment</button></div>
@@ -343,14 +360,15 @@ function owner() {
    <div class="grid">
     <section class="card c2 half"><div class="ch"><span class="ct">${ic("mixer")}Output today</span></div><div class="big">${t.done} <small>${t.target !== null ? `of ${t.target} batches` : "batches finished"}</small></div>
       ${t.target !== null ? `<div class="bar"><b style="width:${Math.min(100, t.done / t.target * 100)}%"></b></div>` : `<div class="why" style="margin-top:10px">Daily target not set</div>`}
-      <div class="muted">${t.litres !== null ? `${fmt(t.done * t.litres)} L` : ""}</div><div class="src"><i>✎</i>Manual · ${lastAt(S.d.batches, "moved_at") || "no batch moved yet"}</div></section>
+      <div class="muted">${t.litres !== null ? `${fmt(t.done * t.litres)} L` : ""}</div>
+      <div class="why" style="margin-top:8px">Material used today: ${kgToday() !== null ? `${fmt(kgToday(), 1)} kg` : "not recorded"} · People today: ${(S.d.labour.find(l => l.day === S.d.today) || {}).people || "not recorded"}</div><div class="src"><i>✎</i>Manual · ${lastAt(S.d.batches, "moved_at") || "no batch moved yet"}</div></section>
     <section class="card c2 half" data-open="o-quality" tabindex="0" role="button"><div class="ch"><span class="ct">${ic("qc")}Quality · this week</span><span class="open">Open ›</span></div>
       <div class="big">${ft !== null ? `${ft}%` : "—"} <small>${ft !== null ? "passed first time" : "no finished batches yet"}</small></div>
       <div class="lg" style="margin-top:14px"><span>${w.n[0]} first time</span><span>${w.n[1]} re-mixed</span><span>${w.n[2]} rejected</span></div><div class="src"><i>✎</i>Manual · QC results</div></section>
     <section class="card c2"><div class="ch"><span class="ct">${ic("coins")}Money lost · this week</span></div>
       <div class="big">${parts ? `AED ${fmt(total)}` : `<span class="nr">Not recorded</span>`}</div><div class="why" style="margin-top:4px">${parts < 2 ? "Incomplete: some prices are not set yet" : "Material loss + equipment stops"}</div>
       ${rows([["Material loss", m.mat !== null ? `AED ${fmt(m.mat)}` : `<span class="nr">Not recorded</span>`, `${fmt(w.lossKg, 1)} kg weighed`, ic("scale", null, {size: "sm"})], ["Equipment stops", m.down !== null ? `AED ${fmt(m.down)}` : `<span class="nr">Not recorded</span>`, mins(w.stopMin), ic("motor", null, {size: "sm"})], ["Re-mixing", `<span class="nr">Not recorded</span>`, `${w.remixes} re-mix${w.remixes === 1 ? "" : "es"}`, ic("rework", null, {size: "sm"})]])}</section>
-    <section class="card c3"><div class="ch"><span class="ct">${ic("motor")}Why equipment stopped · this week</span></div><div class="row"><span class="mid">${mins(w.stopMin)}</span><span class="muted" style="font-size:12px">total stopped</span></div>${bars(w.reasons, mins)}<div class="src"><i>✎</i>Manual · reasons from the site manager</div></section>
+    <section class="card c3"><div class="ch"><span class="ct">${ic("motor")}Why equipment stopped · this week</span></div><div class="row"><span class="mid">${mins(w.stopMin)}</span><span class="muted" style="font-size:12px">total stopped</span></div>${lostLine(w.mixerStopMin, w)}${bars(w.reasons, mins)}<div class="src"><i>✎</i>Manual · reasons from the site manager</div></section>
     <section class="card c3"><div class="ch"><span class="ct">${ic("rework")}Why batches were re-mixed · this week</span></div><div class="row"><span class="mid">${w.remixes}</span><span class="muted" style="font-size:12px">re-mixes</span></div>${bars(w.causes, v => String(v))}<div class="src"><i>✎</i>Manual · QC causes from the site manager</div></section>
     <section class="card c3"><div class="ch"><span class="ct">${ic("tank")}Batches finished · last 7 days</span></div>${dailyChart(w.daily)}${LEGEND}<div class="src"><i>✎</i>Manual · QC results</div></section>
     <section class="card c3"><div class="ch"><span class="ct">${ic("motor")}Downtime by day</span><span class="muted" style="font-size:12px">this week</span></div>${dayList(w)}<div class="src"><i>✎</i>Manual · stops entered by the site manager</div></section>
@@ -396,7 +414,7 @@ function drawer(k) {
     const b = S.d.batches.find(x => x.id === n); if (!b) return null; const e = eq(b.equipment_id), q = qcOf(b.id), s = eqState(e);
     const ev = [[hm(b.started_at), "g", `Started on ${h(e.name)}`], ...q.map(x => [hm(x.at), x.result === "pass" ? "g" : x.result === "remix" ? "a" : "r", `QC: pH ${fmt(x.ph, 2)}, ${fmt(x.visc)} cP · ${x.result === "pass" ? "passed" : x.result === "remix" ? `re-mix (${h(x.cause_what)} ${h(x.cause_dir.toLowerCase())})` : "rejected"}${x.note ? ` · ${h(x.note)}` : ""}`]), ...(b.moved_at ? [[hm(b.moved_at), "g", "Moved to holding tank"]] : [])];
     let body = `${stLine(s.st, {mixing: "Mixing", remix: "Re-mixing", passed: "Passed QC · waiting to move", moved: "Moved to holding tank", rejected: "Rejected"}[b.status])}<h4>Timeline</h4>${tl(ev)}
-      <h4>Readings</h4>${rows([["Temperature", needsConn("Needs a temperature probe"), ""], ["Motor load", needsConn("Needs the drive or a current sensor"), ""]])}`;
+      <h4>Readings</h4>${rows([["Material used", b.kg_used != null ? `${fmt(b.kg_used, 1)} kg` : NR(""), b.kg_used != null ? manual(when(b.kg_at)) : ""], ["Temperature", needsConn("Needs a temperature probe"), ""], ["Motor load", needsConn("Needs the drive or a current sensor"), ""]])}`;
     let after;
     if (!ro && ["mixing", "remix"].includes(b.status)) {
       body += form("fQc", b.status === "remix" ? "Enter QC again" : "Enter QC readings", h(b.code),
@@ -411,13 +429,20 @@ function drawer(k) {
           return {ph, visc: v, result: r, cause_what: val(f, "cause_what"), cause_dir: val(f, "cause_dir"), note: val(f, "note")}; }, `/api/batches/${b.id}/qc`, "QC readings saved"); };
     }
     if (!ro && b.status === "passed") body += `<div style="margin-top:14px"><button class="btn full" type="button" data-act="move:${b.id}">Mark as moved to holding tank</button></div>`;
+    if (!ro) {
+      body += form("fKg", b.kg_used != null ? "Correct the material used" : "Enter the material used", "Total kg of raw material put into this batch, from the scale.",
+        fl(1, "Material used (kg)", 1) + `<input class="inp" name="kg" inputmode="decimal" placeholder="e.g. 950" value="${b.kg_used != null ? b.kg_used : ""}">`, "Save material used");
+      const qcAfter = after;
+      after = () => { if (qcAfter) qcAfter(); bind("fKg", f => { const kg = parseFloat(val(f, "kg")); need(kg > 0, "Enter the material used in kg."); return {kg}; }, `/api/batches/${b.id}/kg`, "Material used saved"); };
+    }
     return {icon: ic("mixer", s.st, {spin: s.spin}), kicker: `Batch · ${e.name}`, title: b.code, body, after};
   }
   if (kind === "stop") {
     const s = S.d.stops.find(x => x.id === n); if (!s) return null; const e = eq(s.equipment_id);
     let body = `${s.ended_at ? stLine("n", `Restarted · stopped for ${mins(minsBetween(s.started_at, s.ended_at))}`) : stLine("r", `Stopped · ${mins(minsBetween(s.started_at))}`)}
       ${tl([[hm(s.started_at), "r", `${h(e.name)} stopped`], ...(s.ended_at ? [[hm(s.ended_at), "g", "Restarted"]] : [])])}
-      <h4>Reason</h4>${rows([["Reason", s.reason ? h(s.reason) : `<span class="nr">Not entered</span>`, s.reason ? manual(when(s.updated_at)) : ""], ...(s.note ? [["Note", h(s.note), ""]] : [])])}`;
+      <h4>Reason</h4>${rows([["Reason", s.reason ? h(s.reason) : `<span class="nr">Not entered</span>`, s.reason ? manual(when(s.updated_at)) : ""], ...(s.note ? [["Note", h(s.note), ""]] : [])])}
+      ${e.kind === "mixer" ? `<h4>Effect</h4>${lostLine(minsBetween(s.started_at, s.ended_at), week()) || `<div class="why">Less than 1 minute</div>`}` : ""}`;
     let after;
     if (!ro) {
       body += form("fStop", s.reason ? "Change the reason" : "Add the stop reason", "Shown to the owner in “Why equipment stopped”.",
@@ -465,9 +490,11 @@ function drawer(k) {
   }
   if (kind === "labour") {
     const l = S.d.labour.find(x => x.day === S.d.today);
-    return {icon: ic("person"), kicker: "Labour", title: "Staff-hours", body: rows(lastDays(7).reverse().map(d => { const x = S.d.labour.find(y => y.day === d); return [d === S.d.today ? "Today" : dm(d), x ? `${fmt(x.hours, 2)} h` : `<span class="nr">Not entered</span>`, x ? manual(when(x.updated_at)) : ""]; })) +
-      form("fLab", "Enter today's labour", setn("labour_rate") === null ? "Set the labour cost per hour in Target and prices to see AED." : "", fl(1, "Staff-hours worked today", 1) + `<input class="inp" name="hours" inputmode="decimal" placeholder="e.g. 24" value="${l ? l.hours : ""}">`, "Save labour"),
-      after: () => bind("fLab", f => { const v = parseFloat(val(f, "hours")); need(v > 0, "Enter the staff-hours."); return {hours: v, day: S.d.today}; }, "/api/labour", "Labour saved")};
+    return {icon: ic("person"), kicker: "Labour", title: "People and hours", body: rows(lastDays(7).reverse().map(d => { const x = S.d.labour.find(y => y.day === d); return [d === S.d.today ? "Today" : dm(d), x ? peopleLine(x) : `<span class="nr">Not entered</span>`, x ? manual(when(x.updated_at)) : ""]; })) +
+      form("fLab", "Enter today's labour", "The app works out the staff-hours." + (setn("labour_rate") === null ? " Set the labour cost per hour in Target and prices to see AED." : ""),
+        fl(1, "Number of people who worked today", 1) + `<input class="inp" name="people" inputmode="numeric" placeholder="e.g. 3" value="${l && l.people ? l.people : ""}">` +
+        fl(2, "Hours each person worked", 1) + `<input class="inp" name="hours_each" inputmode="decimal" placeholder="e.g. 8" value="${l && l.hours_each ? l.hours_each : ""}">`, "Save labour"),
+      after: () => bind("fLab", f => { const p = Number(val(f, "people")), e = parseFloat(val(f, "hours_each")); need(Number.isInteger(p) && p > 0, "Enter the number of people (a whole number)."); need(e > 0 && e <= 24, "Enter the hours each person worked (up to 24)."); return {people: p, hours_each: e, day: S.d.today}; }, "/api/labour", "Labour saved")};
   }
   if (kind === "addStop") return {icon: ic("motor"), kicker: "Downtime", title: "Add a past stop", body: stopForm("fPast", "Add a stop from earlier today"), after: () => bindStop("fPast", S.d.today, closeD)};
   return null;

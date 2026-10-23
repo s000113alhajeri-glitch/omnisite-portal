@@ -51,7 +51,8 @@ CREATE TABLE IF NOT EXISTS equipment(id INTEGER PRIMARY KEY, factory_id INTEGER 
   kind TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'unknown', status_at TEXT, created_at TEXT NOT NULL, UNIQUE(factory_id, name));
 CREATE TABLE IF NOT EXISTS batches(id INTEGER PRIMARY KEY, factory_id INTEGER NOT NULL REFERENCES factories(id), code TEXT NOT NULL,
   equipment_id INTEGER NOT NULL REFERENCES equipment(id), started_at TEXT NOT NULL, status TEXT NOT NULL,
-  qc_count INTEGER NOT NULL DEFAULT 0, finished_at TEXT, moved_at TEXT, user_id INTEGER, UNIQUE(factory_id, code));
+  qc_count INTEGER NOT NULL DEFAULT 0, finished_at TEXT, moved_at TEXT, user_id INTEGER, kg_used REAL, kg_at TEXT,
+  UNIQUE(factory_id, code));
 CREATE TABLE IF NOT EXISTS qc(id INTEGER PRIMARY KEY, batch_id INTEGER NOT NULL REFERENCES batches(id), at TEXT NOT NULL,
   ph REAL NOT NULL, visc REAL NOT NULL, result TEXT NOT NULL, cause_what TEXT DEFAULT '', cause_dir TEXT DEFAULT '',
   note TEXT DEFAULT '', user_id INTEGER);
@@ -62,7 +63,7 @@ CREATE TABLE IF NOT EXISTS losses(id INTEGER PRIMARY KEY, factory_id INTEGER NOT
   kg REAL NOT NULL, type TEXT NOT NULL, batch_id INTEGER REFERENCES batches(id), note TEXT DEFAULT '', user_id INTEGER,
   request_id TEXT UNIQUE);
 CREATE TABLE IF NOT EXISTS labour(factory_id INTEGER NOT NULL REFERENCES factories(id), day TEXT NOT NULL, hours REAL NOT NULL,
-  user_id INTEGER, updated_at TEXT NOT NULL, PRIMARY KEY(factory_id, day));
+  user_id INTEGER, updated_at TEXT NOT NULL, people INTEGER, hours_each REAL, PRIMARY KEY(factory_id, day));
 CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY, factory_id INTEGER, at TEXT NOT NULL, user_id INTEGER,
   kind TEXT NOT NULL, text TEXT NOT NULL);
 """
@@ -89,9 +90,17 @@ def db():
     return c
 
 
+ADDED_COLUMNS = {"batches": {"kg_used": "REAL", "kg_at": "TEXT"}, "labour": {"people": "INTEGER", "hours_each": "REAL"}}
+
+
 def init():
     with db() as c:
         c.executescript(SCHEMA)
+        for table, cols in ADDED_COLUMNS.items():  # databases created before these columns existed
+            have = {r["name"] for r in c.execute(f"PRAGMA table_info({table})")}
+            for col, typ in cols.items():
+                if col not in have:
+                    c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
 
 
 def hash_pw(pw, salt=None):
@@ -347,10 +356,15 @@ def factory_api(c, method, path, body, user, fid, role):
         log(c, fid, uid, "batch", f"Started {code} on {e['name']}")
         return {"ok": True, "code": code}
 
-    m = re.fullmatch(r"/api/batches/(\d+)/(qc|move)", path)
+    m = re.fullmatch(r"/api/batches/(\d+)/(qc|move|kg)", path)
     if m:
         b = get(c, "batches", int(m.group(1)), "batch", fid)
         e = get(c, "equipment", b["equipment_id"], "mixer", fid)
+        if m.group(2) == "kg":
+            kg = num(body.get("kg"), "the material used in kg", 0.01, 1_000_000)
+            c.execute("UPDATE batches SET kg_used=?, kg_at=? WHERE id=?", (kg, now(), b["id"]))
+            log(c, fid, uid, "batch", f"{b['code']} material used: {kg:g} kg")
+            return {"ok": True}
         if m.group(2) == "move":
             need(b["status"] == "passed", f"{b['code']} must pass QC before it is moved." if b["status"] != "moved"
                  else f"{b['code']} is already marked as moved.", 409)
@@ -424,10 +438,18 @@ def factory_api(c, method, path, body, user, fid, role):
     if path == "/api/labour":
         day = text(body.get("day"), 10) or uae_now().date().isoformat()
         need(re.fullmatch(r"\d{4}-\d{2}-\d{2}", day) and day <= uae_now().date().isoformat(), "Pick a day that is not in the future.")
-        hours = num(body.get("hours"), "the staff-hours", 0.25, 2000)
-        c.execute("INSERT INTO labour VALUES(?,?,?,?,?) ON CONFLICT(factory_id,day) DO UPDATE SET hours=excluded.hours,"
-                  "user_id=excluded.user_id,updated_at=excluded.updated_at", (fid, day, hours, uid, now()))
-        log(c, fid, uid, "labour", f"Labour {day}: {hours:g} staff-hours")
+        people = each = None
+        if body.get("people") not in (None, ""):
+            people = num(body.get("people"), "the number of people", 1, 500)
+            need(people == int(people), "The number of people must be a whole number.")
+            people, each = int(people), num(body.get("hours_each"), "the hours each person worked", 0.25, 24)
+            hours = people * each
+        else:
+            hours = num(body.get("hours"), "the staff-hours", 0.25, 2000)
+        c.execute("INSERT INTO labour(factory_id,day,hours,user_id,updated_at,people,hours_each) VALUES(?,?,?,?,?,?,?) "
+                  "ON CONFLICT(factory_id,day) DO UPDATE SET hours=excluded.hours, people=excluded.people, hours_each=excluded.hours_each,"
+                  "user_id=excluded.user_id,updated_at=excluded.updated_at", (fid, day, hours, uid, now(), people, each))
+        log(c, fid, uid, "labour", f"Labour {day}: " + (f"{people} people × {each:g} h = " if people else "") + f"{hours:g} staff-hours")
         return {"ok": True}
 
     raise HTTPError(404, "Not found.")
