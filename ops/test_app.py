@@ -84,6 +84,7 @@ class Journey(unittest.TestCase):
         self.post(f"/api/stops/{stop['id']}", {"reason": "Other"}, code=400)
         self.post(f"/api/stops/{stop['id']}", {"reason": "Drive fault", "note": "called maintenance"})
         self.post(f"/api/stops/{stop['id']}", {"reason": "Drive fault"}, self.o, 403)
+        self.post("/api/batches", {"equipment_id": mixer}, code=409)  # can't start a batch on a stopped mixer
         self.post(f"/api/equipment/{mixer}/status", {"status": "running"}, code=409)  # running needs a batch
         self.post(f"/api/equipment/{mixer}/status", {"status": "idle"})
         stop = self.state()["stops"][0]
@@ -91,6 +92,9 @@ class Journey(unittest.TestCase):
         self.post("/api/stops", {"equipment_id": mixer, "start": "00:00", "end": "00:00", "reason": "Cleaning"}, code=400)
         y = (app.uae_now().date() - app.dt.timedelta(days=1)).isoformat()
         self.post("/api/stops", {"equipment_id": mixer, "day": y, "start": "09:00", "end": "09:40", "reason": "Cleaning"})
+        self.post("/api/stops", {"equipment_id": mixer, "day": y, "start": "23:50", "end": "00:20", "reason": "Cleaning"})  # overnight
+        night = [s for s in self.state()["stops"] if s["day"] == y and s["reason"] == "Cleaning" and s["started_at"] > s["ended_at"][:10]]
+        self.assertTrue(any(app.dt.datetime.fromisoformat(s["ended_at"]) - app.dt.datetime.fromisoformat(s["started_at"]) == app.dt.timedelta(minutes=30) for s in night))
         self.post("/api/stops", {"equipment_id": mixer, "day": "2020-01-01", "start": "09:00", "end": "09:40", "reason": "Cleaning"}, code=400)
         self.assertIn(y, [s["day"] for s in self.state()["stops"]])
 
@@ -103,6 +107,11 @@ class Journey(unittest.TestCase):
         self.assertEqual([l["hours"] for l in self.state()["labour"]], [30])
         self.assertEqual(self.state(self.o)["batches"][0]["code"], code)  # owner sees the same records
         self.assertEqual(self.state(self.a)["batches"][0]["code"], code)  # OmniSite team sees every factory
+        with app.db() as c:  # a batch started 20 days ago but finished today still counts
+            old = (app.dt.datetime.now(app.dt.timezone.utc) - app.dt.timedelta(days=20)).isoformat(timespec="seconds")
+            c.execute("INSERT INTO batches(factory_id,code,equipment_id,started_at,status,qc_count,finished_at,moved_at) VALUES(?,?,?,?,?,?,?,?)",
+                      (self.fa, "MX1-OLD-01", mixer, old, "moved", 1, app.now(), app.now()))
+        self.assertIn("MX1-OLD-01", [b["code"] for b in self.state()["batches"]])
         self.post("/api/labour", {"hours": 8}, self.a)  # and can enter for support
 
     def test_isolation_and_admin(self):

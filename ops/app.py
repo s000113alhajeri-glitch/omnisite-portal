@@ -177,7 +177,7 @@ def set_status(c, e, status, uid, reason="", note=""):
 def state(c, fid, days=14):
     since = (uae_now() - dt.timedelta(days=days)).replace(hour=0, minute=0, second=0).astimezone(dt.timezone.utc).isoformat(timespec="seconds")
     rows = lambda q, *a: [dict(r) for r in c.execute(q, a).fetchall()]
-    batches = rows("SELECT * FROM batches WHERE factory_id=? AND (started_at>=? OR status IN ('mixing','remix','passed')) ORDER BY started_at DESC", fid, since)
+    batches = rows("SELECT * FROM batches WHERE factory_id=? AND (started_at>=? OR finished_at>=? OR moved_at>=? OR status IN ('mixing','remix','passed')) ORDER BY started_at DESC", fid, since, since, since)
     ids = [b["id"] for b in batches] or [0]
     qcs = rows(f"SELECT * FROM qc WHERE batch_id IN ({','.join('?' * len(ids))}) ORDER BY at", *ids)
     stops = rows("SELECT * FROM stops WHERE factory_id=? AND (started_at>=? OR ended_at IS NULL OR ended_at>=?) ORDER BY started_at DESC", fid, since, since)
@@ -333,6 +333,8 @@ def factory_api(c, method, path, body, user, fid, role):
         need(e["kind"] == "mixer", "Batches can only be started on a mixer.")
         busy = c.execute("SELECT code FROM batches WHERE equipment_id=? AND status IN ('mixing','remix','passed')", (e["id"],)).fetchone()
         need(not busy, f"{e['name']} already has batch {busy['code'] if busy else ''}. Finish it first.", 409)
+        need(not c.execute("SELECT 1 FROM stops WHERE equipment_id=? AND ended_at IS NULL", (e["id"],)).fetchone(),
+             f"{e['name']} is marked stopped. Mark it restarted first, so the stop time stays correct.", 409)
         n = [r["id"] for r in c.execute("SELECT id FROM equipment WHERE factory_id=? AND kind='mixer' ORDER BY id", (fid,))].index(e["id"]) + 1
         day = uae_now().strftime("%Y%m%d")
         prefix = f"MX{n}-{day}-"
@@ -383,6 +385,9 @@ def factory_api(c, method, path, body, user, fid, role):
         need(reason != "Other" or note, 'Add a short note for "Other".')
         day = body.get("day")
         start, end = at_time(body.get("start"), "the stop time", day), at_time(body.get("end"), "the restart time", day)
+        if end <= start:  # e.g. 23:50 → 00:20 ends the next day
+            end = (dt.datetime.fromisoformat(end) + dt.timedelta(days=1)).isoformat(timespec="seconds")
+            need(end <= now(), "The restart time can't be in the future.")
         need(end > start, "The restart time must be after the stop time.")
         c.execute("INSERT INTO stops(factory_id,equipment_id,started_at,ended_at,reason,note,user_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
                   (fid, e["id"], start, end, reason, note, uid, now(), now()))

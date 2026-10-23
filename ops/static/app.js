@@ -124,22 +124,25 @@ function week() {
   const fin = S.d.batches.filter(b => set.has(finishedDay(b)));
   const cls = b => b.status === "rejected" ? 2 : b.qc_count > 1 ? 1 : 0;
   const daily = days.map(day => { const v = [0, 0, 0]; fin.filter(b => finishedDay(b) === day).forEach(b => v[cls(b)]++); return {day, v}; });
-  const stops = S.d.stops.filter(s => set.has(dayOf(s.started_at)));
-  const stopMin = stops.reduce((a, s) => a + minsBetween(s.started_at, s.ended_at), 0);
+  const ws = new Date(days[0] + "T00:00:00+04:00").toISOString();
+  const from = s => s.started_at < ws ? ws : s.started_at, sm = s => minsBetween(from(s), s.ended_at);
+  const stops = S.d.stops.filter(s => set.has(dayOf(s.started_at)) || !s.ended_at || s.ended_at >= ws);
+  const stopMin = stops.reduce((a, s) => a + sm(s), 0);
+  const mixerStopMin = stops.filter(s => eq(s.equipment_id).kind === "mixer").reduce((a, s) => a + sm(s), 0);
   const reasons = {};
-  stops.forEach(s => { const k = s.reason || "Reason not entered"; reasons[k] = (reasons[k] || 0) + minsBetween(s.started_at, s.ended_at); });
+  stops.forEach(s => { const k = s.reason || "Reason not entered"; reasons[k] = (reasons[k] || 0) + sm(s); });
   const causes = {};
   S.d.qc.filter(q => q.result === "remix" && set.has(dayOf(q.at))).forEach(q => { const k = `${q.cause_what} ${q.cause_dir.toLowerCase()}`; causes[k] = (causes[k] || 0) + 1; });
-  const perDay = days.map(day => ({day, m: stops.filter(s => dayOf(s.started_at) === day).reduce((a, s) => a + minsBetween(s.started_at, s.ended_at), 0)}));
+  const perDay = days.map(day => ({day, m: stops.filter(s => dayOf(from(s)) === day).reduce((a, s) => a + sm(s), 0)}));
   const losses = S.d.losses.filter(l => set.has(l.day)), lossKg = losses.reduce((a, l) => a + l.kg, 0);
   const lab = S.d.labour.filter(l => set.has(l.day)), labH = lab.reduce((a, l) => a + l.hours, 0);
   const n = [0, 0, 0]; fin.forEach(b => n[cls(b)]++);
-  return {days, daily, fin, n, stops, stopMin, reasons, causes, perDay, losses, lossKg, lab, labH,
+  return {days, daily, fin, n, stops, stopMin, mixerStopMin, reasons, causes, perDay, losses, lossKg, lab, labH,
     remixes: S.d.qc.filter(q => q.result === "remix" && set.has(dayOf(q.at))).length};
 }
 function money(w) {
   const p = setn("price_kg"), sc = setn("stop_cost_h"), lr = setn("labour_rate");
-  return {mat: p !== null ? w.lossKg * p : null, down: sc !== null ? w.stopMin / 60 * sc : null, lab: lr !== null ? w.labH * lr : null};
+  return {mat: p !== null ? w.lossKg * p : null, down: sc !== null ? w.mixerStopMin / 60 * sc : null, lab: lr !== null ? w.labH * lr : null};
 }
 function lastAt(list, key) { const t = list.map(x => x[key]).filter(Boolean).sort().pop(); return t ? when(t) : null; }
 
@@ -378,7 +381,7 @@ function drawer(k) {
   if (kind === "addFactory" && S.user.admin) return {icon: ic("mixer"), kicker: "OmniSite team", title: "Add factory", body: form("fFac", "Add a factory", "It starts empty. Next, add its site manager and owner.", fl(1, "Factory name", 1) + `<input class="inp" name="name" placeholder="e.g. Chemex" style="min-height:0">`, "Add factory"),
     after: () => bindAdmin("fFac", f => { need(val(f, "name"), "Enter the factory name."); return {name: val(f, "name")}; }, "/api/admin/factories", "Factory added")};
   if (kind === "addPerson" && S.user.admin) { const f = S.admin.factories.find(x => x.id === n); if (!f) return null;
-    return {icon: ic("person"), kicker: h(f.name), title: "Add person", body: form("fPer", `Add a login for ${h(f.name)}`, "Give the person their email and password yourself. Nothing is sent automatically.",
+    return {icon: ic("person"), kicker: f.name, title: "Add person", body: form("fPer", `Add a login for ${h(f.name)}`, "Give the person their email and password yourself. Nothing is sent automatically.",
       fl(1, "Role", 1) + chips("role", [["manager", "Site manager (enters information)"], ["owner", "Owner (view only)"]]) + fl(2, "Name", 1) + `<input class="inp" name="name" style="min-height:0">` +
       fl(3, "Email", 1) + `<input class="inp" name="email" type="email" autocomplete="off" style="min-height:0">` + fl(4, "Password", 0, "(at least 10 characters · leave empty if this email already has a login)") + `<input class="inp" name="password" type="text" autocomplete="off" style="min-height:0">`, "Add person"),
       after: () => bindAdmin("fPer", x => { need(val(x, "role"), "Pick the role."); need(/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(val(x, "email")), "Enter a valid email."); const pw = val(x, "password"); need(!pw || pw.length >= 10, "The password needs at least 10 characters.");
@@ -402,7 +405,7 @@ function drawer(k) {
           return {ph, visc: v, result: r, cause_what: val(f, "cause_what"), cause_dir: val(f, "cause_dir"), note: val(f, "note")}; }, `/api/batches/${b.id}/qc`, "QC readings saved"); };
     }
     if (!ro && b.status === "passed") body += `<div style="margin-top:14px"><button class="btn full" type="button" data-act="move:${b.id}">Mark as moved to holding tank</button></div>`;
-    return {icon: ic("mixer", s.st, {spin: s.spin}), kicker: `Batch · ${h(e.name)}`, title: b.code, body, after};
+    return {icon: ic("mixer", s.st, {spin: s.spin}), kicker: `Batch · ${e.name}`, title: b.code, body, after};
   }
   if (kind === "stop") {
     const s = S.d.stops.find(x => x.id === n); if (!s) return null; const e = eq(s.equipment_id);
@@ -416,7 +419,7 @@ function drawer(k) {
       if (!s.ended_at) body += `<div class="btns"><button class="btn ghost" type="button" data-act="restart:${e.id}">${e.kind === "mixer" && activeBatch(e.id) ? "Mark running again" : "Mark restarted (idle)"}</button></div>`;
       after = () => bind("fStop", f => { need(val(f, "reason"), "Pick a reason."); need(val(f, "reason") !== "Other" || val(f, "note"), 'Add a short note for "Other".'); return {reason: val(f, "reason"), note: val(f, "note")}; }, `/api/stops/${s.id}`, "Stop reason saved");
     }
-    return {icon: ic(e.kind, s.ended_at ? "n" : "r"), kicker: `Stop · ${h(e.name)}`, title: s.ended_at ? `${h(e.name)} stop` : `${h(e.name)} stopped`, body, after};
+    return {icon: ic(e.kind, s.ended_at ? "n" : "r"), kicker: `Stop · ${e.name}`, title: s.ended_at ? `${e.name} stop` : `${e.name} stopped`, body, after};
   }
   if (kind === "eq") {
     const e = S.d.equipment.find(x => x.id === n); if (!e) return null; const s = eqState(e), b = activeBatch(e.id);
