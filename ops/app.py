@@ -79,6 +79,8 @@ CREATE TABLE IF NOT EXISTS readings(id INTEGER PRIMARY KEY, factory_id INTEGER N
   at TEXT NOT NULL, value REAL NOT NULL, UNIQUE(signal_id, at));
 CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY, factory_id INTEGER, at TEXT NOT NULL, user_id INTEGER,
   kind TEXT NOT NULL, text TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS support(id INTEGER PRIMARY KEY, factory_id INTEGER NOT NULL REFERENCES factories(id), user_id INTEGER,
+  at TEXT NOT NULL, text TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open', resolved_at TEXT, resolved_by INTEGER);
 """
 
 
@@ -368,13 +370,38 @@ def react(c, fid, sg, v, t):
                   (f"Trip code {int(v)}", now(), e["id"]))
 
 
+PRIVATE_METRICS = ("weigh_kg",)  # production figures: the OmniSite team sees that data arrives, not the value
+
+
+def support_rows(c, where="1=1", *a):
+    return [dict(r) for r in c.execute(
+        "SELECT s.*, f.name AS factory, u.name AS who FROM support s JOIN factories f ON f.id=s.factory_id "
+        f"LEFT JOIN users u ON u.id=s.user_id WHERE {where} ORDER BY s.status='resolved', s.id DESC LIMIT 200", a)]
+
+
+def health(c, fid):
+    """What the OmniSite team sees of a factory: setup and connection health only, never its records or money."""
+    rows = lambda q, *a: [dict(r) for r in c.execute(q, a).fetchall()]
+    signals = rows("SELECT id, equipment_id, metric, last_value, last_at FROM signals WHERE factory_id=? ORDER BY id", fid)
+    for x in signals:
+        if x["metric"] in PRIVATE_METRICS:
+            x["last_value"] = None
+    return {"health_only": True, "now": now(), "today": uae_now().date().isoformat(),
+            "factory": dict(c.execute("SELECT id, name FROM factories WHERE id=?", (fid,)).fetchone()),
+            "equipment": rows("SELECT id, factory_id, name, kind, status, status_at, status_src FROM equipment WHERE factory_id=? ORDER BY id", fid),
+            "signals": signals, "gateways": rows("SELECT id, name, created_at, last_seen FROM gateways WHERE factory_id=? ORDER BY id", fid)}
+
+
 def connections_api(c, method, path, body, fid, uid):
     if method == "GET" and path == "/api/connections":
-        rows = lambda q, *a: [dict(r) for r in c.execute(q, a).fetchall()]
+        rows = lambda q, *a: [{**dict(r), **({"value": None} if "value" in r.keys() and r["metric"] in PRIVATE_METRICS else {}),
+                               **({"last_value": None} if "last_value" in r.keys() and r["metric"] in PRIVATE_METRICS else {})}
+                              for r in c.execute(q, a).fetchall()]
         return {"gateways": rows("SELECT id, name, created_at, last_seen, last_payload, last_unknown FROM gateways WHERE factory_id=? ORDER BY id", fid),
                 "signals": rows("SELECT * FROM signals WHERE factory_id=? ORDER BY id", fid),
                 "readings": rows("SELECT r.at, r.value, s.tag, s.metric, s.equipment_id FROM readings r JOIN signals s ON s.id=r.signal_id "
                                  "WHERE r.factory_id=? ORDER BY r.at DESC, r.id DESC LIMIT 100", fid),
+                "private_metrics": list(PRIVATE_METRICS),
                 "metrics": {k: {"label": v[0], "unit": v[1]} for k, v in METRICS.items()}}
     need(method == "POST", "Not found.", 404)
     if path == "/api/gateways":
@@ -440,7 +467,12 @@ def admin_api(c, method, path, body, user):
         return {"factories": [dict(r) for r in c.execute("SELECT * FROM factories ORDER BY name")],
                 "people": [dict(r) for r in c.execute("SELECT m.factory_id, m.role, u.id AS user_id, u.name, u.email FROM memberships m "
                                                          "JOIN users u ON u.id=m.user_id ORDER BY u.name")],
-                "team": [dict(r) for r in c.execute("SELECT id, name, email FROM users WHERE is_admin=1 ORDER BY name")]}
+                "team": [dict(r) for r in c.execute("SELECT id, name, email FROM users WHERE is_admin=1 ORDER BY name")],
+                "support": support_rows(c),
+                "health": [{**health(c, f["id"]), "faults": [dict(r) for r in c.execute(
+                    "SELECT s.equipment_id, e.name AS equipment, s.last_value AS code, s.last_at FROM signals s JOIN equipment e ON e.id=s.equipment_id "
+                    "WHERE s.factory_id=? AND s.metric='trip' AND s.last_value IS NOT NULL AND s.last_value<>0", (f["id"],))]}
+                    for f in c.execute("SELECT id FROM factories ORDER BY name").fetchall()]}
     need(method == "POST", "Not found.", 404)
     if path == "/api/admin/factories":
         name = text(body.get("name"), 80)
@@ -474,6 +506,12 @@ def admin_api(c, method, path, body, user):
                   (uid, fid, role, now()))
         log(c, fid, user["id"], "people", f"{email} added as {role}")
         return {"ok": True, "existing": bool(u)}
+    if path == "/api/admin/support/resolve":
+        r = c.execute("SELECT * FROM support WHERE id=?", (int(body.get("id") or 0),)).fetchone()
+        need(r, "This request was not found. Refresh the page.", 404)
+        if r["status"] != "resolved":
+            c.execute("UPDATE support SET status='resolved', resolved_at=?, resolved_by=? WHERE id=?", (now(), user["id"], r["id"]))
+        return {"ok": True}
     if path == "/api/admin/people/remove":
         fid, uid = int(body.get("factory_id") or 0), int(body.get("user_id") or 0)
         r = c.execute("SELECT u.email FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.user_id=? AND m.factory_id=?", (uid, fid)).fetchone()
@@ -502,11 +540,22 @@ def api(c, method, path, body, user):
 def factory_api(c, method, path, body, user, fid, role):
     uid = user["id"]
     if method == "GET" and path == "/api/state":
-        return state(c, fid)
+        return health(c, fid) if role == "admin" else {**state(c, fid), "support": support_rows(c, "s.factory_id=?", fid)}
+    if path == "/api/support":
+        need(method == "POST", "Not found.", 404)
+        need(role in ROLES, "Support requests come from the factory's site manager or owner.", 403)
+        msg = text(body.get("text"), 1000)
+        need(msg, "Write what went wrong.")
+        dup = c.execute("SELECT id FROM support WHERE factory_id=? AND user_id=? AND text=? AND status='open'", (fid, uid, msg)).fetchone()
+        if dup:
+            return {"ok": True, "id": dup["id"], "existing": True}
+        rid = c.execute("INSERT INTO support(factory_id,user_id,at,text) VALUES(?,?,?,?)", (fid, uid, now(), msg)).lastrowid
+        return {"ok": True, "id": rid}
     if path in ("/api/connections", "/api/gateways", "/api/signals") or re.fullmatch(r"/api/(gateways|signals)/\d+/remove", path):
         need(role == "admin", "Only the OmniSite team can set up connections.", 403)
         return connections_api(c, method, path, body, fid, uid)
     need(method == "POST", "Not found.", 404)
+    need(role != "admin" or path == "/api/equipment", "The OmniSite team doesn't see or enter the factory's records. The site manager does.", 403)
     need(role in ("admin", "manager"), "View only. The site manager enters this information.", 403)
 
     if path == "/api/settings":
@@ -554,7 +603,7 @@ def factory_api(c, method, path, body, user, fid, role):
         return {"ok": True}
 
     if path == "/api/batches":
-        need(role == "admin", "View only. The site manager adds notes and reasons; batches are not started from here.", 403)
+        need(role == "manager", "Only the site manager records a batch start. It is a record only; nothing switches the mixer on or off.", 403)
         e = get(c, "equipment", int(body.get("equipment_id") or 0), "mixer", fid)
         need(e["kind"] == "mixer", "Batches can only be started on a mixer.")
         busy = c.execute("SELECT code FROM batches WHERE equipment_id=? AND status IN ('mixing','remix','passed')", (e["id"],)).fetchone()

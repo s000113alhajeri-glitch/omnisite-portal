@@ -64,9 +64,11 @@ class Journey(unittest.TestCase):
         self.post("/api/settings", {"target_batches": "5", "price_kg": "5"})
         mixer = self.state()["equipment"][0]["id"]
 
-        code = self.post("/api/batches", {"equipment_id": mixer}, self.a)["code"]
+        self.post("/api/batches", {"equipment_id": mixer}, self.a, 403)  # OmniSite team never enters factory records
+        self.post("/api/batches", {"equipment_id": mixer}, self.o, 403)
+        code = self.post("/api/batches", {"equipment_id": mixer})["code"]  # the site manager records the start
         self.assertRegex(code, r"^MX1-\d{8}-01$")
-        self.post("/api/batches", {"equipment_id": mixer}, self.a, code=409)  # one batch per mixer
+        self.post("/api/batches", {"equipment_id": mixer}, code=409)  # one batch per mixer
         b = self.state()["batches"][0]["id"]
         self.post(f"/api/batches/{b}/move", {}, code=409)  # can't move before QC
         self.post(f"/api/batches/{b}/qc", {"ph": 15, "visc": 2400, "result": "pass"}, code=400)
@@ -79,15 +81,18 @@ class Journey(unittest.TestCase):
         bb = self.state()["batches"][0]
         self.assertEqual((bb["status"], bb["qc_count"]), ("moved", 2))
 
-        self.post(f"/api/equipment/{mixer}/status", {"status": "stopped"}, self.a)
+        self.post(f"/api/equipment/{mixer}/status", {"status": "stopped"}, self.a, 403)  # nobody switches equipment from the app
+        self.post(f"/api/equipment/{mixer}/status", {"status": "stopped"}, self.m, 403)
+        with app.db() as c:  # the sensor does it
+            app.set_status(c, c.execute("SELECT * FROM equipment WHERE id=?", (mixer,)).fetchone(), "stopped", None, src="sensor")
         stop = self.state()["stops"][0]
         self.assertIsNone(stop["ended_at"])
         self.post(f"/api/stops/{stop['id']}", {"reason": "Other"}, code=400)
         self.post(f"/api/stops/{stop['id']}", {"reason": "Drive fault", "note": "called maintenance"})
         self.post(f"/api/stops/{stop['id']}", {"reason": "Drive fault"}, self.o, 403)
-        self.post("/api/batches", {"equipment_id": mixer}, self.a, code=409)  # can't start a batch on a stopped mixer
-        self.post(f"/api/equipment/{mixer}/status", {"status": "running"}, self.a, code=409)  # running needs a batch
-        self.post(f"/api/equipment/{mixer}/status", {"status": "idle"}, self.a)
+        self.post("/api/batches", {"equipment_id": mixer}, code=409)  # can't start a batch on a stopped mixer
+        with app.db() as c:
+            app.set_status(c, c.execute("SELECT * FROM equipment WHERE id=?", (mixer,)).fetchone(), "idle", None, src="sensor")
         stop = self.state()["stops"][0]
         self.assertEqual((stop["reason"], bool(stop["ended_at"])), ("Drive fault", True))
         self.post("/api/stops", {"equipment_id": mixer, "start": "00:00", "end": "00:00", "reason": "Cleaning"}, code=400)
@@ -119,13 +124,36 @@ class Journey(unittest.TestCase):
         self.assertEqual(self.state()["batches"][0]["kg_used"], 980)
         self.post(f"/api/batches/{bid}/kg", {"kg": 900}, self.o, 403)
         self.assertEqual(self.state(self.o)["batches"][0]["code"], code)  # owner sees the same records
-        self.assertEqual(self.state(self.a)["batches"][0]["code"], code)  # OmniSite team sees every factory
+        team = self.state(self.a)  # OmniSite team: setup and connection health only
+        self.assertTrue(team["health_only"])
+        self.assertEqual(sorted(team), sorted(["health_only", "now", "today", "factory", "equipment", "signals", "gateways"]))
         with app.db() as c:  # a batch started 20 days ago but finished today still counts
             old = (app.dt.datetime.now(app.dt.timezone.utc) - app.dt.timedelta(days=20)).isoformat(timespec="seconds")
             c.execute("INSERT INTO batches(factory_id,code,equipment_id,started_at,status,qc_count,finished_at,moved_at) VALUES(?,?,?,?,?,?,?,?)",
                       (self.fa, "MX1-OLD-01", mixer, old, "moved", 1, app.now(), app.now()))
         self.assertIn("MX1-OLD-01", [b["code"] for b in self.state()["batches"]])
-        self.post("/api/labour", {"hours": 8}, self.a)  # and can enter for support
+        for path, body in (("/api/labour", {"hours": 8}), ("/api/losses", {"kg": 1, "type": "Spillage"}), ("/api/settings", {"price_kg": "9"}),
+                           (f"/api/batches/{bid}/kg", {"kg": 1}), (f"/api/stops/{stop['id']}", {"reason": "Cleaning"})):
+            self.assertIn("OmniSite team", self.post(path, body, self.a, 403)["error"])
+
+    def test_support_requests(self):
+        self.post("/api/support", {"text": " "}, code=400)
+        self.post("/api/support", {"text": "Sensor shows no data"}, self.a, 403)  # requests come from the factory
+        rid = self.post("/api/support", {"text": "Sensor shows no data"})["id"]
+        self.assertTrue(self.post("/api/support", {"text": "Sensor shows no data"})["existing"])  # double tap: no duplicate
+        self.post("/api/support", {"text": "Dashboard did not load"}, self.o)
+        self.assertEqual(len(self.state()["support"]), 2)
+        s, d, _ = call("POST", f"/api/f/{self.fb}/support", {"text": "x"}, self.m)
+        self.assertEqual(s, 404)  # not this manager's factory
+        self.assertEqual(call("GET", f"/api/f/{self.fb}/state", None, self.o)[1]["support"], [])
+        inbox = call("GET", "/api/admin", None, self.a)[1]
+        mine = [r for r in inbox["support"] if r["id"] == rid][0]
+        self.assertEqual((mine["factory"], mine["status"]), ("Factory A", "open"))
+        self.assertIn("faults", inbox["health"][0])
+        self.assertNotIn("batches", inbox["health"][0])
+        self.assertEqual(call("POST", "/api/admin/support/resolve", {"id": rid}, self.m)[0], 403)
+        self.assertEqual(call("POST", "/api/admin/support/resolve", {"id": rid}, self.a)[0], 200)
+        self.assertEqual([r["status"] for r in self.state()["support"] if r["id"] == rid], ["resolved"])
 
     def test_isolation_and_admin(self):
         B = f"/api/f/{self.fb}"
@@ -208,9 +236,9 @@ class Gateway(unittest.TestCase):
         self.assertEqual((s, d["saved"], d["unknown_tags"]), (200, 1, ["nope"]))
         st = call("GET", F + "/state", None, m)[1]
         self.assertEqual((st["stops"], st["equipment"][0]["status"], st["equipment"][0]["status_src"]), ([], "idle", "sensor"))
-        P("/batches", {"equipment_id": eid}, m, 403)
+        P("/batches", {"equipment_id": eid}, a, 403)
         P(f"/equipment/{eid}/status", {"status": "stopped"}, m, 403)
-        P("/batches", {"equipment_id": eid})
+        P("/batches", {"equipment_id": eid}, m)
         t0 = int(app.dt.datetime.now(app.dt.timezone.utc).timestamp()) + 1
         s, d = ingest(key, {"readings": [{"tag": "m1_hz", "value": 5000, "at": t0}, {"tag": "scale_kg", "value": 400, "at": t0 + 1},
                                          {"tag": "m1_temp", "value": 41.5, "at": t0 + 2}, {"tag": "m1_wh", "value": 1000, "at": t0 + 3}]})
@@ -234,6 +262,8 @@ class Gateway(unittest.TestCase):
         self.assertEqual(ingest(key, {"readings": [{"tag": "m1_hz", "value": 1, "at": t0 + 99999}]})[1]["refused"], 1)  # future time
         self.assertTrue(st["gateways"][0]["last_seen"])
         cn = call("GET", F + "/connections", None, a)[1]
+        self.assertTrue(all(r["value"] is None for r in cn["readings"] if r["metric"] == "weigh_kg"))  # kg is the factory's figure
+        self.assertTrue(any(r["value"] is not None for r in cn["readings"] if r["metric"] == "speed_hz"))
         self.assertNotIn("key_hash", cn["gateways"][0]); self.assertTrue(cn["readings"])
         gid = cn["gateways"][0]["id"]
         P(f"/gateways/{gid}/remove", {})
