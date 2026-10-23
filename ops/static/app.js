@@ -73,6 +73,15 @@ function lastDays(n) { const out = [], t = new Date(S.d.today + "T12:00:00Z"); f
 // ---------- small render helpers ----------
 const SRC = (i, t) => `<span class="src"><i>${i}</i>${t}</span>`;
 const manual = t => SRC("✎", "Manual · " + t), est = t => SRC("≈", "Estimate · " + t);
+const sensor = t => SRC("●", "Sensor · " + t);
+const srcOf = (x, t) => x && x.source === "sensor" ? sensor(t) : manual(t);
+const sig = (eid, m) => (S.d.signals || []).find(x => x.equipment_id === eid && x.metric === m);
+const unit = m => S.meta.metrics[m].unit;
+const sigVal = x => x.last_value === null ? NR("No data yet") : x.metric === "trip" ? (x.last_value ? `<span class="st"><span class="dot r"></span>Trip ${fmt(x.last_value)}</span>` : "No trip") : `${fmt(x.last_value, 2)} ${unit(x.metric)}`;
+const sensorStops = () => S.d.stops.some(s => s.source === "sensor");
+const stopsSrc = m => sensorStops() ? `<i>●</i>Sensor · drive stops · <i style="margin-left:6px">✎</i>Manual · reasons` : `<i>✎</i>Manual · ${m}`;
+const kgOf = b => b.kg_used != null ? b.kg_used : b.s && b.s.kg != null ? b.s.kg : null;
+const quiet = g => { const t = g.last_seen || g.created_at; return minsBetween(t) >= S.meta.quiet_min; };
 const needsConn = what => `<span class="nr">Needs connection</span><div class="why">${what}</div>`;
 const NR = w => `<span class="nr">Not recorded</span>${w ? `<div class="why">${w}</div>` : ""}`;
 const rows = a => a.map(([k, v, s, icn, open]) => `<div class="li" ${open ? `data-open="${open}" tabindex="0" style="cursor:pointer"` : ""}><div class="l">${icn || ""}<div>${k}${s ? `<div>${s}</div>` : ""}</div></div><div class="v">${v}</div></div>`).join("");
@@ -143,7 +152,7 @@ function week() {
   const losses = S.d.losses.filter(l => set.has(l.day)), lossKg = losses.reduce((a, l) => a + l.kg, 0);
   const lab = S.d.labour.filter(l => set.has(l.day)), labH = lab.reduce((a, l) => a + l.hours, 0);
   const n = [0, 0, 0]; fin.forEach(b => n[cls(b)]++);
-  const withKg = fin.filter(b => b.kg_used != null), kgUsed = withKg.reduce((a, b) => a + b.kg_used, 0);
+  const withKg = fin.filter(b => kgOf(b) != null), kgUsed = withKg.reduce((a, b) => a + kgOf(b), 0);
   const timed = S.d.batches.filter(b => b.finished_at && b.status !== "rejected");
   const avgMin = timed.length ? timed.reduce((a, b) => a + minsBetween(b.started_at, b.finished_at), 0) / timed.length : null;
   return {days, daily, fin, n, stops, stopMin, mixerStopMin, reasons, causes, perDay, losses, lossKg, lab, labH, withKg, kgUsed, avgMin,
@@ -161,7 +170,7 @@ function lostLine(min, w) {  // effect of mixer stop minutes, without any prices
   return `<div class="row" style="margin-top:6px"><span>≈ <b style="font-weight:600">${fmt(n, 1)}</b> batch${fmt(n, 1) === "1" ? "" : "es"} not made</span></div>${est(`${mins(min)} of mixer stops ÷ average batch time ${mins(Math.round(w.avgMin))}`)}`;
 }
 const peopleLine = x => x ? `${x.people ? `${x.people} people × ${fmt(x.hours_each, 2)} h = ` : ""}${fmt(x.hours, 2)} staff-hours` : "";
-const kgToday = () => { const b = S.d.batches.filter(x => finishedDay(x) === S.d.today && x.kg_used != null); return b.length ? b.reduce((a, x) => a + x.kg_used, 0) : null; };
+const kgToday = () => { const b = S.d.batches.filter(x => finishedDay(x) === S.d.today && kgOf(x) != null); return b.length ? b.reduce((a, x) => a + kgOf(x), 0) : null; };
 function lastAt(list, key) { const t = list.map(x => x[key]).filter(Boolean).sort().pop(); return t ? when(t) : null; }
 
 // ---------- alerts + actions ----------
@@ -169,20 +178,25 @@ function alerts() {
   const out = [];
   S.d.equipment.forEach(e => { const s = openStop(e.id); if (!s) return;
     out.push({c: "red", open: `stop:${s.id}`, icon: ic(e.kind, "r"), head: stLine("r", "Stopped"), t: `${h(e.name)} stopped · ${mins(minsBetween(s.started_at))}`,
-      d: s.reason ? `Reason: <b>${h(s.reason)}</b>${s.note ? ` · ${h(s.note)}` : ""}` : "No reason entered yet.", src: manual(`marked stopped ${when(s.started_at)}`), btn: s.reason ? "Open" : "Add reason"}); });
+      head: stLine("r", s.source === "sensor" ? "Stopped mid-batch" : "Stopped"),
+      d: s.reason ? `Reason: <b>${h(s.reason)}</b>${s.note ? ` · ${h(s.note)}` : ""}` : "No reason entered yet.", src: srcOf(s, `${s.source === "sensor" ? "drive stopped" : "marked stopped"} ${when(s.started_at)}`), btn: s.reason ? "Open" : "Add reason"}); });
+  (S.d.signals || []).filter(x => x.metric === "trip" && x.last_value).forEach(x => { const e = eq(x.equipment_id);
+    out.push({c: "red", open: `eq:${e.id}`, icon: ic(e.kind, "r"), head: stLine("r", "Drive trip"), t: `${h(e.name)} drive reported trip code ${fmt(x.last_value)}`, d: "Check the drive display. The code is from the drive, not entered by staff.", src: sensor(when(x.last_at)), btn: "Open"}); });
+  (S.d.gateways || []).filter(quiet).forEach(g => out.push({c: "amber", open: `gw:${g.id}`, icon: ic("gateway", "a"), head: stLine("a", "Not sending data"), t: `${h(g.name)} is not sending data`,
+    d: g.last_seen ? `Last data ${when(g.last_seen)}. Sensor values below are not live. Check power and 4G at the gateway.` : "No data received yet since it was added.", src: "", btn: "Open"}));
   return out;
 }
 function actions() {
   const out = [], w = week();
   w.stops.filter(s => s.ended_at && !s.reason).forEach(s => out.push({c: "red", open: `stop:${s.id}`, icon: ic(eq(s.equipment_id).kind, "r"), code: h(eq(s.equipment_id).name), tag: stLine("r", "Reason needed"),
-    d: `Stopped ${dm(dayOf(s.started_at))} ${hm(s.started_at)} for ${mins(minsBetween(s.started_at, s.ended_at))}. Add why it stopped.`, src: manual("stop entered"), btn: "Add reason"}));
+    d: `Stopped ${dm(dayOf(s.started_at))} ${hm(s.started_at)} for ${mins(minsBetween(s.started_at, s.ended_at))}. Add why it stopped.`, src: srcOf(s, s.source === "sensor" ? "drive stopped" : "stop entered"), btn: "Add reason"}));
   S.d.batches.filter(b => ["mixing", "remix", "passed"].includes(b.status)).forEach(b => {
     const e = eq(b.equipment_id);
     if (b.status === "passed") out.push({c: "amber", open: `batch:${b.id}`, icon: ic("tank", "a"), code: h(b.code), tag: stLine("a", "Waiting to move"), d: `Passed QC. Confirm it was moved to the holding tank.`, src: manual(`QC passed ${when(b.finished_at)}`), btn: "Mark as moved", act: `move:${b.id}`});
     else if (b.status === "remix") out.push({c: "amber", open: `batch:${b.id}`, icon: ic("qc", "a"), code: h(b.code), tag: stLine("a", "Re-mixing"), d: `${h(e.name)} · enter QC again when the re-mix is done.`, src: manual(`QC ${when(qcOf(b.id).slice(-1)[0].at)}`), btn: "Enter QC again"});
     else out.push({c: "grey", open: `batch:${b.id}`, icon: ic("qc", "n"), code: h(b.code), tag: stLine("n", "Mixing"), d: `${h(e.name)} · enter the QC readings (pH, viscosity) when checked.`, src: manual(`started ${when(b.started_at)}`), btn: "Enter QC readings", ghost: true});
   });
-  S.d.batches.filter(b => finishedDay(b) === S.d.today && b.kg_used == null).forEach(b => out.push({c: "grey", open: `batch:${b.id}`, icon: ic("scale", "n"), code: h(b.code), tag: stLine("n", "Missing info"), d: "Enter the kg of material used for this batch.", src: "", btn: "Enter kg used", ghost: true}));
+  S.d.batches.filter(b => finishedDay(b) === S.d.today && kgOf(b) == null).forEach(b => out.push({c: "grey", open: `batch:${b.id}`, icon: ic("scale", "n"), code: h(b.code), tag: stLine("n", "Missing info"), d: "Enter the kg of material used for this batch.", src: "", btn: "Enter kg used", ghost: true}));
   if (S.d.equipment.length && !S.d.labour.find(l => l.day === S.d.today)) out.push({c: "grey", open: "labour", icon: ic("person", "n"), code: "Labour today", tag: stLine("n", "Missing info"), d: "Enter how many people worked today and their hours.", src: "", btn: "Enter labour", ghost: true});
   if (S.d.equipment.length && setn("target_batches") === null) out.push({c: "grey", open: "settings", icon: ic("mixer", "n"), code: "Daily target", tag: stLine("n", "Not set"), d: "Set how many batches are planned per day.", src: "", btn: "Set target", ghost: true});
   return out;
@@ -196,15 +210,16 @@ const NAV_IC = {
   overview: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
   batches: '<path d="M6 3h12M7 3v6l-3 9a2 2 0 0 0 2 3h12a2 2 0 0 0 2-3l-3-9V3"/>', downtime: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
   costs: '<path d="M4 19h16M7 16V9M12 16V5M17 16v-4"/>', equipment: '<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M5 19l2-2M17 7l2-2"/>'};
-const view = () => location.hash === "#admin" && S.user.admin ? "admin" : VIEWS[location.hash.slice(1)] ? location.hash.slice(1) : "overview";
-const LEG = `<div class="legend"><span class="src" style="margin:0"><i>✎</i>Manual: entered by the site manager</span><span class="src" style="margin:0"><i>≈</i>Estimate: calculated from your prices</span><span class="src" style="margin:0"><i>●</i>Sensor: not connected yet</span></div>`;
+const view = () => location.hash === "#admin" && S.user.admin ? "admin" : location.hash === "#connections" && S.user.admin && S.fid ? "connections" : VIEWS[location.hash.slice(1)] ? location.hash.slice(1) : "overview";
+const LEG = () => `<div class="legend"><span class="src" style="margin:0"><i>✎</i>Manual: entered by the site manager</span><span class="src" style="margin:0"><i>≈</i>Estimate: calculated from your prices</span><span class="src" style="margin:0"><i>●</i>Sensor: ${S.d && (S.d.signals || []).length ? "read automatically" : "not connected yet"}</span></div>`;
 const fname = () => S.d && S.d.factory ? S.d.factory.name : (fac() || {}).name || "";
 const nowLine = () => `${new Date().toLocaleDateString("en-GB", {weekday: "long", day: "numeric", month: "short", timeZone: TZ})} · Now ${hm(new Date().toISOString())}`;
 
 function manager() {
   const v = view();
-  const nav = (S.fid ? Object.keys(VIEWS) : []).map(k => `<a href="#${k}" data-v="${k}" class="${k === v ? "on" : ""}" ${k === v ? 'aria-current="page"' : ""}><svg viewBox="0 0 24 24">${NAV_IC[k]}</svg><span>${k === "overview" ? "Overview" : VIEWS[k]}</span></a>`).join("") + (S.user.admin ? `<a href="#admin" class="${v === "admin" ? "on" : ""}"><svg viewBox="0 0 24 24"><path d="M4 21V9l5 3V9l5 3V5h6v16z"/></svg><span>Factories</span></a>` : "");
+  const nav = (S.fid ? Object.keys(VIEWS) : []).map(k => `<a href="#${k}" data-v="${k}" class="${k === v ? "on" : ""}" ${k === v ? 'aria-current="page"' : ""}><svg viewBox="0 0 24 24">${NAV_IC[k]}</svg><span>${k === "overview" ? "Overview" : VIEWS[k]}</span></a>`).join("") + (S.user.admin && S.fid ? `<a href="#connections" class="${v === "connections" ? "on" : ""}" ${v === "connections" ? 'aria-current="page"' : ""}><svg viewBox="0 0 24 24">${ICONS.gateway}</svg><span>Connections</span></a>` : "") + (S.user.admin ? `<a href="#admin" class="${v === "admin" ? "on" : ""}"><svg viewBox="0 0 24 24"><path d="M4 21V9l5 3V9l5 3V5h6v16z"/></svg><span>Factories</span></a>` : "");
   if (v === "admin") return shell(nav, "Factories", vAdmin(), "");
+  if (v === "connections") return shell(nav, "Connections", vConn(), "");
   const body = !S.d.equipment.length && v !== "equipment" ? setupCard() : {overview: vOverview, batches: vBatches, downtime: vDowntime, costs: vCosts, equipment: vEquipment}[v]();
   const rail = v === "overview" && S.d.equipment.length ? railHtml() : "";
   return shell(nav, VIEWS[v], body, rail);
@@ -213,7 +228,7 @@ function shell(nav, title, body, rail) {
   const who = S.user.admin ? "OmniSite team" : "Site manager";
   return `<div class="app"><aside class="side"><div class="brand">OmniSite<small>${who}${fname() && title !== "Factories" ? ` · ${h(fname())}` : ""}</small></div>${switcher()}<nav class="nav">${nav}</nav>
    <div class="foot">${h(S.user.name)}<br><button class="lo" type="button" onclick="logout()">Log out</button></div></aside>
-   <main><div class="top"><div><h1>${title}</h1><div class="sub">${nowLine()}</div></div><div><div class="mwho">${h(S.user.name)} · <button class="lo" type="button" onclick="logout()">Log out</button></div>${title === "Factories" ? "" : LEG}</div></div>
+   <main><div class="top"><div><h1>${title}</h1><div class="sub">${nowLine()}</div></div><div><div class="mwho">${h(S.user.name)} · <button class="lo" type="button" onclick="logout()">Log out</button></div>${title === "Factories" ? "" : LEG()}</div></div>
    <div class="layout ${rail ? "" : "solo"}"><div class="grid">${body}</div>${rail}</div></main></div>`;
 }
 function vAdmin() {
@@ -227,6 +242,26 @@ function vAdmin() {
   const team = `<section class="card c6"><div class="ch"><span class="ct">${ic("person")}OmniSite team · sees all factories</span></div>${rows(A.team.map(u => [h(u.name), h(u.email), ""]))}<div class="why" style="margin-top:8px">Team logins are added by OmniSite on the server.</div></section>`;
   return add + (cards || `<section class="card c6 setup"><div class="muted">No factories yet. Tap “Add factory” to add the first one.</div></section>`) + team;
 }
+function vConn() {
+  const C = S.conn; if (!C) return `<section class="card c6"><div class="muted">Loading…</div></section>`;
+  const M = C.metrics, url = `${location.origin}${BASE}/api/ingest`, tagsOf = C.signals.map(x => x.tag);
+  const gws = `<section class="card c6"><div class="ch"><span class="ct">${ic("gateway")}Gateways · ${C.gateways.length}</span><button class="btn" type="button" data-open="addGw">Add gateway</button></div>
+    <div class="why">OmniSite team only. Each gateway has its own key; the factory's staff never see this page.</div>
+    ${C.gateways.length ? rows(C.gateways.map(g => [`<b style="font-weight:600">${h(g.name)}</b>${g.last_unknown ? `<div class="why">Tags not linked yet: ${h(g.last_unknown)}</div>` : ""}`, g.last_seen ? stLine(quiet(g) ? "a" : "g", quiet(g) ? "Not sending data" : "Online") : stLine("n", "No data yet"),
+      `${g.last_seen ? sensor(`last data ${when(g.last_seen)}`) : `added ${when(g.created_at)}`} <button class="lo" type="button" data-act="rmgw:${g.id}" style="margin-left:8px">Remove</button>`, ic("gateway", null, {size: "sm"}), `gw:${g.id}`])) : empty("No gateway yet. Add it on the day the engineer installs it.")}</section>`;
+  const sigs = `<section class="card c6"><div class="ch"><span class="ct">${ic("bolt")}Signals · ${C.signals.length}</span><button class="btn ghost" type="button" data-open="addSig">Add signal</button></div>
+    <div class="why">Link each tag the gateway sends to a piece of equipment.</div>
+    ${C.signals.length ? `<table class="rec"><thead><tr><th>Tag</th><th>Equipment</th><th>Measures</th><th class="hidem">Conversion</th><th>Last value</th><th></th></tr></thead><tbody>${C.signals.map(x => `<tr><td class="mono">${h(x.tag)}</td><td>${h(eq(x.equipment_id).name)}</td><td>${h(M[x.metric].label)}</td><td class="hidem">× ${fmt(x.mult, 6)}${x.plus ? ` + ${fmt(x.plus, 4)}` : ""}</td><td>${x.last_at ? `${fmt(x.last_value, 2)} ${h(M[x.metric].unit)}<div class="why">${when(x.last_at)}</div>` : `<span class="nr">No data yet</span>`}</td><td><button class="lo" type="button" data-act="rmsig:${x.id}">Remove</button></td></tr>`).join("")}</tbody></table>` : empty("No signals yet.")}</section>`;
+  const ex = JSON.stringify({readings: (tagsOf.length ? tagsOf.slice(0, 3) : ["mixer1_hz"]).map(t => ({tag: t, value: 0, at: "unix time or ISO"}))}, null, 1);
+  const eng = `<section class="card c6"><div class="ch"><span class="ct">${ic("other")}Settings for the engineer</span></div>
+    ${rows([["1. Server address (HTTP POST)", `<span class="mono" style="word-break:break-all">${h(url)}</span>`, ""], ["2. HTTP header", `<span class="mono">X-Gateway-Key: (the gateway key)</span>`, ""], ["3. Content type", `<span class="mono">application/json</span>`, ""]])}
+    <div class="why" style="margin-top:8px">Body: either this format, or the gateway's own JSON with a name and a value for each reading. Values are converted with each signal's multiplier, e.g. Altivar 212 speed FD00 is in 0.01 Hz → multiplier 0.01; energy FE76 is in Wh → 0.001 for kWh. Confirm the format on site with "Last message received".</div>
+    <pre class="mono" style="background:#f7f7f7;border:1px solid var(--line);border-radius:10px;padding:10px;font-size:12px;overflow:auto">${h(ex)}</pre></section>`;
+  const rd = `<section class="card c6"><div class="ch"><span class="ct">${ic("scale")}Recent readings · last ${C.readings.length}</span><button class="btn ghost" type="button" data-act="refconn">Refresh</button></div>
+    ${C.readings.length ? `<table class="rec"><thead><tr><th>Time</th><th>Tag</th><th>Equipment</th><th>Value</th></tr></thead><tbody>${C.readings.map(r => `<tr><td>${dm(dayOf(r.at))} ${hm(r.at)}:${new Date(r.at).toISOString().slice(17, 19)}</td><td class="mono">${h(r.tag)}</td><td>${h(eq(r.equipment_id).name)}</td><td>${fmt(r.value, 3)} ${h(M[r.metric].unit)}</td></tr>`).join("")}</tbody></table>` : empty("No readings received yet.")}</section>`;
+  return gws + sigs + eng + rd;
+}
+async function loadConn() { S.conn = await api("GET", "/api/connections"); render(); }
 function setupCard() {
   return `<section class="card c6 setup"><div class="ch"><span class="ct">${ic("mixer", null, {size: "lg"})}<span style="font-size:18px;font-weight:600;color:var(--ink)">Set up ${setv("factory_name") ? h(fname()) : "your factory"}</span></span></div>
    <div class="muted">Nothing is recorded yet. Start with these steps:</div>
@@ -235,7 +270,7 @@ function setupCard() {
 }
 function railHtml() {
   const al = alerts(), ac = actions();
-  return `<aside class="rail"><div><h2>Alerts <span class="count">${al.length}</span></h2>${al.map(alertCard).join("") || empty("No alerts. No equipment is marked stopped.")}</div>
+  return `<aside class="rail"><div><h2>Alerts <span class="count">${al.length}</span></h2>${al.map(alertCard).join("") || empty("No alerts. No equipment is stopped.")}</div>
    <div><h2>Needs action <span class="count">${ac.length}</span></h2>${ac.map(actCard).join("") || empty("Nothing needs action right now.")}</div></aside>`;
 }
 function vOverview() {
@@ -254,7 +289,7 @@ function vOverview() {
      <div class="big">${w.stops.length ? mins(w.stopMin) : "0 min"} <small>stopped this week</small></div>
      <div style="margin-top:10px">${stopped.length ? stLine("r", `${stopped.map(e => h(e.name)).join(", ")} stopped now`) : stLine("g", "Nothing stopped now")}</div>
      <div class="why" style="margin-top:6px">${top ? `Top reason: ${h(top[0])}` : w.stops.length ? "Reasons not entered yet" : "No stops recorded this week"}${w.lost ? ` · ≈ ${fmt(w.lost, 1)} batches not made (estimate)` : ""}</div>
-     <div class="src" style="margin-top:auto;padding-top:12px"><i>✎</i>Manual · ${lastAt(S.d.stops, "updated_at") || "no stops entered"}</div></section>
+     <div class="src" style="margin-top:auto;padding-top:12px">${stopsSrc(lastAt(S.d.stops, "updated_at") || "no stops entered")}</div></section>
    <section class="card c3 sum" data-go="costs" tabindex="0" role="link"><div class="ch"><span class="ct">${ic("coins", null, {size: "lg"})}Costs</span>${go}</div>
      <div class="big">${m.mat !== null ? `AED ${fmt(m.mat)}` : `${fmt(w.lossKg, 1)} kg`} <small>material lost this week</small></div>
      <div style="margin-top:10px">${m.mat === null ? stLine("a", "Material price not set") : stLine("g", "Price set")}</div>
@@ -264,7 +299,7 @@ function vOverview() {
      <div class="big">${running} <small>of ${ms.length} mixer${ms.length === 1 ? "" : "s"} running</small></div>
      <div class="eqmini">${S.d.equipment.slice(0, 6).map(e => { const s = eqState(e); return ic(e.kind, s.st, {spin: s.spin}); }).join("")}</div>
      <div class="why" style="margin-top:6px">${S.d.equipment.slice(0, 4).map(e => `${h(e.name)} ${eqState(e).label.toLowerCase()}`).join(" · ")}</div>
-     <div class="src" style="margin-top:auto;padding-top:12px"><i>✎</i>Manual · status entered by the site manager</div></section>`;
+     <div class="src" style="margin-top:auto;padding-top:12px">${(S.d.signals || []).some(x => x.metric === "speed_hz") ? `<i>●</i>Sensor · drive signal${S.d.equipment.some(e => e.status_src !== "sensor") ? ` · <i style="margin-left:6px">✎</i>Manual · other equipment` : ""}` : `<i>✎</i>Manual · status entered by the site manager`}</div></section>`;
 }
 function batchCard(b) {
   const e = eq(b.equipment_id), q = qcOf(b.id), last = q.slice(-1)[0], s = eqState(e);
@@ -274,7 +309,7 @@ function batchCard(b) {
    <div class="steps">${[1, 2, 3, 4].map(i => `<span class="${i < step ? "done" : i === step ? "now" : ""}"></span>`).join("")}</div>
    <div class="timer" data-since="${b.started_at}">${clock(nowMs() - new Date(b.started_at))}</div>
    <div class="kv"><div><b>${last ? `${fmt(last.ph, 2)} pH` : "—"}</b>${last ? manual(when(last.at)) : `<div class="why">pH at QC check</div>`}</div><div><b>${last ? `${fmt(last.visc)} cP` : "—"}</b>${last ? manual(when(last.at)) : `<div class="why">Viscosity at QC check</div>`}</div></div>
-   <div class="src"><i>✎</i>Manual · started ${when(b.started_at)} · Temperature and motor load need a sensor</div></section>`;
+   <div class="src"><i>✎</i>Manual · started ${when(b.started_at)}${sig(b.equipment_id, "temp_c") || sig(b.equipment_id, "current_pct") ? "" : " · Temperature and motor load need a sensor"}</div></section>`;
 }
 function vBatches() {
   const t = today(), w = week(), act = S.d.batches.filter(b => ["mixing", "remix", "passed"].includes(b.status));
@@ -306,10 +341,10 @@ function vDowntime() {
   return `<section class="card c3"><div class="ch"><span class="ct">${ic("motor")}Downtime by day</span><span class="muted" style="font-size:12px">this week</span></div>
     <div class="row" style="margin-bottom:10px"><span class="mid">${mins(w.stopMin)}</span></div>${lostLine(w.mixerStopMin, w) ? `<div style="margin:-4px 0 12px">${lostLine(w.mixerStopMin, w)}</div>` : ""}
     ${dayList(w)}
-    <div class="why" style="margin-top:8px">Shift split not shown: shift times are not set.</div><div class="src"><i>✎</i>Manual · stops entered by the site manager</div></section>
+    <div class="why" style="margin-top:8px">Shift split not shown: shift times are not set.</div><div class="src">${stopsSrc("stops entered by the site manager")}</div></section>
    <section class="card c3"><div class="ch"><span class="ct">${ic("motor")}Why equipment stopped · this week</span></div>${bars(w.reasons, mins)}<div class="src"><i>✎</i>Manual · reasons entered by the site manager</div></section>
    <section class="card c6"><div class="ch"><span class="ct">${ic("motor")}Stops · this week</span><button class="btn ghost" type="button" data-open="addStop">Add a past stop</button></div>
-    ${w.stops.length ? rows(w.stops.map(s => [`${h(eq(s.equipment_id).name)} · ${dm(dayOf(s.started_at))} ${hm(s.started_at)}${s.ended_at ? `–${hm(s.ended_at)}` : " · still stopped"}`, s.reason ? h(s.reason) : `<span class="nr">Reason not entered</span>`, manual(`${mins(minsBetween(s.started_at, s.ended_at))} · ${when(s.updated_at)}`), ic(eq(s.equipment_id).kind, s.ended_at ? null : "r", {size: "sm"}), `stop:${s.id}`])) : empty("No stops recorded this week.")}</section>`;
+    ${w.stops.length ? rows(w.stops.map(s => [`${h(eq(s.equipment_id).name)} · ${dm(dayOf(s.started_at))} ${hm(s.started_at)}${s.ended_at ? `–${hm(s.ended_at)}` : " · still stopped"}`, s.reason ? h(s.reason) : `<span class="nr">Reason not entered</span>`, srcOf(s, `${mins(minsBetween(s.started_at, s.ended_at))} · ${when(s.updated_at)}`), ic(eq(s.equipment_id).kind, s.ended_at ? null : "r", {size: "sm"}), `stop:${s.id}`])) : empty("No stops recorded this week.")}</section>`;
 }
 function vCosts() {
   const w = week(), m = money(w), t = S.d.today, lossToday = S.d.losses.filter(l => l.day === t).reduce((a, l) => a + l.kg, 0), p = setn("price_kg");
@@ -322,7 +357,7 @@ function vCosts() {
     <div class="big">${w.labH ? fmt(w.labH, 1) : "—"} <small>staff-hours</small></div><div class="src"><i>✎</i>Manual · ${lastAt(w.lab, "updated_at") || "not entered"}</div><div class="sep"></div>
     <div class="row"><span class="mid">${aed(m.lab, "Labour cost per hour not set")}</span></div><div class="why" style="margin-top:6px">Today: ${peopleLine(S.d.labour.find(l => l.day === S.d.today)) || "not entered"}</div></section>
    <section class="card c6"><div class="ch"><span class="ct">${ic("scale")}Material used · this week</span><span class="muted" style="font-size:12px">${w.withKg.length} of ${w.fin.length} finished batch${w.fin.length === 1 ? "" : "es"} weighed</span></div>
-    ${rows([["Total used", w.withKg.length ? `${fmt(w.kgUsed, 1)} kg` : NR("Enter it in each batch"), w.withKg.length ? manual(lastAt(w.withKg, "kg_at")) : ""],
+    ${rows([["Total used", w.withKg.length ? `${fmt(w.kgUsed, 1)} kg` : NR("Enter it in each batch"), w.withKg.length ? (w.withKg.every(b => b.kg_used == null) ? sensor("from the scale") : w.withKg.some(b => b.kg_used == null) ? manual(lastAt(w.withKg.filter(b => b.kg_used != null), "kg_at")) + sensor("and the scale") : manual(lastAt(w.withKg, "kg_at"))) : ""],
       ["Average per batch", w.withKg.length ? `${fmt(w.kgUsed / w.withKg.length, 1)} kg` : NR(""), ""],
       ["Material cost per batch", w.withKg.length && p !== null ? `AED ${fmt(w.kgUsed / w.withKg.length * p)}` : NR(p === null ? "Set the material price" : ""), w.withKg.length && p !== null ? est("average kg × your price") : ""]])}</section>
    <section class="card c6" data-open="settings" tabindex="0" role="button"><div class="ch"><span class="ct">${ic("coins")}Money lost · this week</span><span class="open">Prices ›</span></div>
@@ -333,9 +368,9 @@ function vCosts() {
 }
 function vEquipment() {
   return `<section class="card c6 eq"><div class="ch"><span class="ct">Equipment</span><button class="btn ghost" type="button" data-open="addEq">Add equipment</button></div>
-    ${S.d.equipment.length ? rows(S.d.equipment.map(e => { const s = eqState(e); return [`<b style="font-weight:600">${h(e.name)}</b> <span class="muted">· ${h(S.meta.kinds[e.kind])}</span>`, stLine(s.st, s.label), e.status_at ? manual(when(e.status_at)) : `<div class="why">Status not entered yet</div>`, ic(e.kind, s.st, {spin: s.spin}), `eq:${e.id}`]; }))
+    ${S.d.equipment.length ? rows(S.d.equipment.map(e => { const s = eqState(e); return [`<b style="font-weight:600">${h(e.name)}</b> <span class="muted">· ${h(S.meta.kinds[e.kind])}</span>`, stLine(s.st, s.label), e.status_at ? (e.status_src === "sensor" ? sensor : manual)(when(e.status_at)) : `<div class="why">Status not entered yet</div>`, ic(e.kind, s.st, {spin: s.spin}), `eq:${e.id}`]; }))
       : empty("No equipment yet. Add each mixer and tank you want to follow.")}
-    <div class="why" style="margin-top:12px">No sensors are connected yet, so status is entered by the site manager.</div></section>
+    <div class="why" style="margin-top:12px">${(S.d.signals || []).length ? `Signals: ${S.d.signals.length} · Gateway ${(S.d.gateways || []).some(g => !quiet(g)) ? "online" : "not sending data"}. Equipment without a signal is entered by the site manager.` : "No sensors are connected yet, so status is entered by the site manager."}</div></section>
    <section class="card c6" data-open="settings" tabindex="0" role="button"><div class="ch"><span class="ct">${ic("coins")}Target and prices</span><span class="open">Edit ›</span></div>
     ${rows(Object.entries(S.meta.settings).map(([k, label]) => [label, setv(k) !== null ? h(setv(k)) : `<span class="nr">Not set</span>`, S.d.settings[k] ? manual(when(S.d.settings[k].at)) : ""]))}</section>`;
 }
@@ -346,12 +381,12 @@ function owner() {
   const waiting = S.d.batches.filter(b => b.status === "passed"), remix = S.d.batches.filter(b => b.status === "remix");
   let light;
   if (!S.d.equipment.length) light = {c: "n", label: "Not set up", line: "The site manager hasn't added equipment yet."};
-  else if (stopped.length) { const s = openStop(stopped[0].id); light = {c: "r", label: "Needs attention", line: `${h(stopped.map(e => e.name).join(", "))} stopped.`, sub: s.reason ? `Reason: <b style="color:var(--ink)">${h(s.reason)}</b>` : "Reason not entered yet", src: manual(when(s.updated_at))}; }
+  else if (stopped.length) { const s = openStop(stopped[0].id); light = {c: "r", label: "Needs attention", line: `${h(stopped.map(e => e.name).join(", "))} stopped.`, sub: s.reason ? `Reason: <b style="color:var(--ink)">${h(s.reason)}</b>` : "Reason not entered yet", src: s.reason && s.source !== "sensor" ? manual(when(s.updated_at)) : srcOf(s, when(s.started_at))}; }
   else if (waiting.length || remix.length) light = {c: "a", label: "Waiting", line: waiting.length ? `${h(waiting[0].code)} passed QC and is waiting to move.` : `${h(remix[0].code)} is being re-mixed.`};
   else if (mixers().some(e => eqState(e).st === "g")) light = {c: "g", label: "OK", line: "Running normally."};
   else light = {c: "n", label: "No batch running", line: "No batch is in progress right now."};
   const tiles = S.d.equipment.filter(e => ["mixer", "tank", "pump", "filler"].includes(e.kind)).slice(0, 4).map(e => { const s = eqState(e), b = activeBatch(e.id);
-    return `<div class="mtile">${ic(e.kind, s.st, {size: "lg", spin: s.spin})}<div><b>${h(e.name)}</b>${stLine(s.st, s.label)}<div class="why" style="margin-top:4px">${b ? h(b.code) : openStop(e.id) ? `Stopped for ${mins(minsBetween(openStop(e.id).started_at))}` : ""}</div>${e.status_at ? manual(when(e.status_at)) : ""}</div></div>`; }).join("");
+    return `<div class="mtile">${ic(e.kind, s.st, {size: "lg", spin: s.spin})}<div><b>${h(e.name)}</b>${stLine(s.st, s.label)}<div class="why" style="margin-top:4px">${b ? h(b.code) : openStop(e.id) ? `Stopped for ${mins(minsBetween(openStop(e.id).started_at))}` : ""}</div>${e.status_at ? (e.status_src === "sensor" ? sensor : manual)(when(e.status_at)) : ""}</div></div>`; }).join("");
   const total = [m.mat, m.down].filter(v => v !== null).reduce((a, b) => a + b, 0), parts = [m.mat, m.down].filter(v => v !== null).length;
   const ft = w.fin.length ? Math.round(w.n[0] / w.fin.length * 100) : null;
   return `<div class="owner"><div class="otop"><div><div class="obrand">OmniSite<small>Factory owner · ${h(fname())}</small></div>${switcher() ? `<div style="margin-top:10px;max-width:260px">${switcher()}</div>` : ""}<h1 style="margin-top:14px">Your factory today</h1><div class="sub">${nowLine()}</div></div>
@@ -371,7 +406,7 @@ function owner() {
     <section class="card c3"><div class="ch"><span class="ct">${ic("motor")}Why equipment stopped · this week</span></div><div class="row"><span class="mid">${mins(w.stopMin)}</span><span class="muted" style="font-size:12px">total stopped</span></div>${lostLine(w.mixerStopMin, w)}${bars(w.reasons, mins)}<div class="src"><i>✎</i>Manual · reasons from the site manager</div></section>
     <section class="card c3"><div class="ch"><span class="ct">${ic("rework")}Why batches were re-mixed · this week</span></div><div class="row"><span class="mid">${w.remixes}</span><span class="muted" style="font-size:12px">re-mixes</span></div>${bars(w.causes, v => String(v))}<div class="src"><i>✎</i>Manual · QC causes from the site manager</div></section>
     <section class="card c3"><div class="ch"><span class="ct">${ic("tank")}Batches finished · last 7 days</span></div>${dailyChart(w.daily)}${LEGEND}<div class="src"><i>✎</i>Manual · QC results</div></section>
-    <section class="card c3"><div class="ch"><span class="ct">${ic("motor")}Downtime by day</span><span class="muted" style="font-size:12px">this week</span></div>${dayList(w)}<div class="src"><i>✎</i>Manual · stops entered by the site manager</div></section>
+    <section class="card c3"><div class="ch"><span class="ct">${ic("motor")}Downtime by day</span><span class="muted" style="font-size:12px">this week</span></div>${dayList(w)}<div class="src">${stopsSrc("stops entered by the site manager")}</div></section>
    </div></div>`;
 }
 
@@ -414,7 +449,10 @@ function drawer(k) {
     const b = S.d.batches.find(x => x.id === n); if (!b) return null; const e = eq(b.equipment_id), q = qcOf(b.id), s = eqState(e);
     const ev = [[hm(b.started_at), "g", `Started on ${h(e.name)}`], ...q.map(x => [hm(x.at), x.result === "pass" ? "g" : x.result === "remix" ? "a" : "r", `QC: pH ${fmt(x.ph, 2)}, ${fmt(x.visc)} cP · ${x.result === "pass" ? "passed" : x.result === "remix" ? `re-mix (${h(x.cause_what)} ${h(x.cause_dir.toLowerCase())})` : "rejected"}${x.note ? ` · ${h(x.note)}` : ""}`]), ...(b.moved_at ? [[hm(b.moved_at), "g", "Moved to holding tank"]] : [])];
     let body = `${stLine(s.st, {mixing: "Mixing", remix: "Re-mixing", passed: "Passed QC · waiting to move", moved: "Moved to holding tank", rejected: "Rejected"}[b.status])}<h4>Timeline</h4>${tl(ev)}
-      <h4>Readings</h4>${rows([["Material used", b.kg_used != null ? `${fmt(b.kg_used, 1)} kg` : NR(""), b.kg_used != null ? manual(when(b.kg_at)) : ""], ["Temperature", needsConn("Needs a temperature probe"), ""], ["Motor load", needsConn("Needs the drive or a current sensor"), ""]])}`;
+      <h4>Readings</h4>${rows([["Material used", b.kg_used != null ? `${fmt(b.kg_used, 1)} kg` : b.s.kg != null ? `${fmt(b.s.kg, 1)} kg` : NR(""), b.kg_used != null ? manual(when(b.kg_at)) + (b.s.kg != null ? `<div class="why">Scale: ${fmt(b.s.kg, 1)} kg</div>` : "") : b.s.kg != null ? sensor(`${b.s.weighings} weighing${b.s.weighings === 1 ? "" : "s"} · ${when(b.s.kg_at)}`) : ""],
+        ["Temperature", b.s.temp ? `${fmt(b.s.temp.last, 1)} °C` : sig(e.id, "temp_c") ? NR("No reading during this batch") : needsConn("Needs a temperature probe"), b.s.temp ? sensor(`${fmt(b.s.temp.lo, 1)}–${fmt(b.s.temp.hi, 1)} °C in this batch · ${when(b.s.temp.at)}`) : ""],
+        ["Motor load", b.s.current ? `${fmt(b.s.current.avg, 0)}% avg` : sig(e.id, "current_pct") ? NR("No reading during this batch") : needsConn("Needs the drive or a current sensor"), b.s.current ? sensor(`max ${fmt(b.s.current.hi, 0)}% of rated current · ${when(b.s.current.at)}`) : ""],
+        ...(sig(e.id, "energy_kwh") ? [["Energy", b.s.kwh != null ? `${fmt(b.s.kwh, 2)} kWh` : NR("Needs 2 readings in this batch"), b.s.kwh != null ? sensor(when(b.s.kwh_at)) : ""]] : [])])}`;
     let after;
     if (!ro && ["mixing", "remix"].includes(b.status)) {
       body += form("fQc", b.status === "remix" ? "Enter QC again" : "Enter QC readings", h(b.code),
@@ -430,8 +468,8 @@ function drawer(k) {
     }
     if (!ro && b.status === "passed") body += `<div style="margin-top:14px"><button class="btn full" type="button" data-act="move:${b.id}">Mark as moved to holding tank</button></div>`;
     if (!ro) {
-      body += form("fKg", b.kg_used != null ? "Correct the material used" : "Enter the material used", "Total kg of raw material put into this batch, from the scale.",
-        fl(1, "Material used (kg)", 1) + `<input class="inp" name="kg" inputmode="decimal" placeholder="e.g. 950" value="${b.kg_used != null ? b.kg_used : ""}">`, "Save material used");
+      body += form("fKg", b.kg_used != null ? "Correct the material used" : "Enter the material used", b.s.kg != null ? "The scale's total is used unless you enter a corrected value." : "Total kg of raw material put into this batch, from the scale.",
+        fl(1, "Material used (kg)", 1) + `<input class="inp" name="kg" inputmode="decimal" placeholder="kg from the scale" value="${b.kg_used != null ? b.kg_used : ""}">`, "Save material used");
       const qcAfter = after;
       after = () => { if (qcAfter) qcAfter(); bind("fKg", f => { const kg = parseFloat(val(f, "kg")); need(kg > 0, "Enter the material used in kg."); return {kg}; }, `/api/batches/${b.id}/kg`, "Material used saved"); };
     }
@@ -454,7 +492,8 @@ function drawer(k) {
   }
   if (kind === "eq") {
     const e = S.d.equipment.find(x => x.id === n); if (!e) return null; const s = eqState(e), b = activeBatch(e.id);
-    let body = `${stLine(s.st, s.label)}${e.status_at ? `<div>${manual(when(e.status_at))}</div>` : ""}<h4>Sensor readings</h4>${rows([["Run / stop signal", needsConn("Status is entered by hand until a sensor is connected"), ""]])}`;
+    const es = (S.d.signals || []).filter(x => x.equipment_id === e.id);
+    let body = `${stLine(s.st, s.label)}${e.status_at ? `<div>${e.status_src === "sensor" ? sensor(when(e.status_at)) : manual(when(e.status_at))}</div>` : ""}<h4>Sensor readings</h4>${es.length ? rows(es.map(x => [h(S.meta.metrics[x.metric].label), sigVal(x), x.last_at ? sensor(when(x.last_at)) : ""])) : rows([["Run / stop signal", needsConn("Status is entered by hand until a sensor is connected"), ""]])}`;
     if (b) body += `<h4>Batch</h4>${rows([[h(b.code), "Open ›", "", "", `batch:${b.id}`]])}`;
     if (!ro) {
       const btn = (st, l, ghost) => `<button class="btn ${ghost ? "ghost" : ""}" type="button" data-act="status:${e.id}:${st}">${l}</button>`;
@@ -496,6 +535,26 @@ function drawer(k) {
         fl(2, "Hours each person worked", 1) + `<input class="inp" name="hours_each" inputmode="decimal" placeholder="e.g. 8" value="${l && l.hours_each ? l.hours_each : ""}">`, "Save labour"),
       after: () => bind("fLab", f => { const p = Number(val(f, "people")), e = parseFloat(val(f, "hours_each")); need(Number.isInteger(p) && p > 0, "Enter the number of people (a whole number)."); need(e > 0 && e <= 24, "Enter the hours each person worked (up to 24)."); return {people: p, hours_each: e, day: S.d.today}; }, "/api/labour", "Labour saved")};
   }
+  if (kind === "gw") {
+    const g = (S.d.gateways || []).find(x => x.id === n); if (!g) return null; const full = S.conn && S.conn.gateways.find(x => x.id === n);
+    return {icon: ic("gateway", g.last_seen && !quiet(g) ? "g" : "a"), kicker: "Gateway", title: g.name, body: `${g.last_seen ? stLine(quiet(g) ? "a" : "g", quiet(g) ? "Not sending data" : "Online") : stLine("n", "No data received yet")}
+      ${rows([["Last data", g.last_seen ? when(g.last_seen) : NR(""), g.last_seen ? sensor("received by the server") : ""], ["Signals", String((S.d.signals || []).length), ""]])}
+      ${full && full.last_payload ? `<h4>Last message received</h4><pre class="mono" style="white-space:pre-wrap;word-break:break-all;background:#f7f7f7;border:1px solid var(--line);border-radius:10px;padding:10px;font-size:12px">${h(full.last_payload)}</pre>` : ""}
+      <div class="why" style="margin-top:10px">If it stays "Not sending data", check the gateway's power, its 4G signal and the server address.</div>`};
+  }
+  if (kind === "addGw" && S.user.admin) return {icon: ic("gateway"), kicker: "Connections", title: "Add gateway", body: `<div id="gwKey"></div>` + form("fGw", "Add a gateway", "A secret key is created. It is shown only once: put it in the gateway's HTTP header.", fl(1, "Name", 1) + `<input class="inp" name="name" placeholder="e.g. Gateway near Mixer 1" style="min-height:0">`, "Create key"),
+    after: () => { const f = $("#fGw"); f.onsubmit = async e => { e.preventDefault(); const box = f.querySelector(".err"), b = f.querySelector("button.btn");
+      if (!val(f, "name")) { box.textContent = "Enter a name."; box.hidden = false; return; } if (b.disabled) return; b.disabled = true; b.textContent = "Saving…";
+      try { const r = await api("POST", "/api/gateways", {name: val(f, "name")}); f.remove(); $("#gwKey").innerHTML = `<div class="form"><h5>Gateway key</h5><div class="why">Copy it now. It can't be shown again; if it's lost, remove the gateway and add a new one.</div><pre class="mono" style="white-space:pre-wrap;word-break:break-all;background:#f7f7f7;border:1px solid var(--line);border-radius:10px;padding:10px">${h(r.key)}</pre></div>`; await reload(); toast("Gateway added"); }
+      catch (er) { box.textContent = er.error; box.hidden = false; b.disabled = false; b.textContent = "Try again"; } }; }};
+  if (kind === "addSig" && S.user.admin) { const M = S.meta.metrics;
+    return {icon: ic("bolt"), kicker: "Connections", title: "Add signal", body: form("fSig", "Link a tag to equipment", "Use the exact tag name set in the gateway.",
+      fl(1, "Equipment", 1) + chips("equipment_id", S.d.equipment.map(e => [String(e.id), e.name])) + fl(2, "What it measures", 1) + chips("metric", Object.entries(M).map(([k, v]) => [k, `${v.label}${v.unit ? ` (${v.unit})` : ""}`])) +
+      fl(3, "Tag name", 1) + `<input class="inp" name="tag" placeholder="e.g. mixer1_hz" style="min-height:0" autocapitalize="off">` +
+      fl(4, "Multiplier", 0, "(optional · default 1, e.g. 0.01 for Altivar speed)") + `<input class="inp" name="mult" inputmode="decimal" style="min-height:0">` + fl(5, "Offset", 0, "(optional · added after the multiplier)") + `<input class="inp" name="plus" inputmode="decimal" style="min-height:0">` +
+      `<div class="why" style="margin-top:8px">The scale is linked to the mixer it fills, so its weighings count into that mixer's running batch.</div>`, "Add signal"),
+      after: () => bind("fSig", f => { need(val(f, "equipment_id"), "Pick the equipment."); need(val(f, "metric"), "Pick what it measures."); need(/^[A-Za-z0-9_.-]{1,60}$/.test(val(f, "tag")), "Enter the tag name (letters, numbers, _ . -).");
+        return {equipment_id: Number(val(f, "equipment_id")), metric: val(f, "metric"), tag: val(f, "tag"), mult: val(f, "mult"), plus: val(f, "plus")}; }, "/api/signals", "Signal added", async () => { closeD(); await loadConn(); })}; }
   if (kind === "addStop") return {icon: ic("motor"), kicker: "Downtime", title: "Add a past stop", body: stopForm("fPast", "Add a stop from earlier today"), after: () => bindStop("fPast", S.d.today, closeD)};
   return null;
 }
@@ -524,6 +583,9 @@ async function loadAdmin() { S.admin = await api("GET", "/api/admin"); render();
 async function act(a) {
   const [k, id, st] = a.split(":");
   if (k === "open") return switchF(id);
+  if (k === "refconn") return loadConn().catch(e => toast(e.error));
+  if (k === "rmgw" || k === "rmsig") { if (S.busy || !confirm(k === "rmgw" ? "Remove this gateway? Its key stops working straight away." : "Remove this signal and its readings?")) return; S.busy = true;
+    try { await api("POST", `/api/${k === "rmgw" ? "gateways" : "signals"}/${id}/remove`, {}); await reload(); await loadConn(); toast("Removed"); } catch (e) { toast(e.error); } finally { S.busy = false; } return; }
   if (k === "rm") { if (S.busy || !confirm("Remove this person from the factory? Their login will no longer open it.")) return; S.busy = true;
     try { await api("POST", "/api/admin/people/remove", {user_id: Number(id), factory_id: Number(st)}); await loadAdmin(); toast("Removed"); } catch (e) { toast(e.error); } finally { S.busy = false; } return; }
   const path = k === "move" ? `/api/batches/${id}/move` : `/api/equipment/${id}/status`;
@@ -545,7 +607,7 @@ function loginView() {
     b.disabled = true; try { const r = await api("POST", "/api/login", {email: val(f, "email"), password: f.password.value}); S.user = r.user; pickFactory(); await load(); } catch (er) { box.textContent = er.error; box.hidden = false; b.disabled = false; } };
 }
 async function logout() { try { await api("POST", "/api/logout"); } catch (e) {} S.user = null; closeD(); render(); }
-async function reload() { if (S.fid) S.d = await api("GET", "/api/state"); if (view() === "admin") S.admin = await api("GET", "/api/admin"); render(); }
+async function reload() { if (S.fid) S.d = await api("GET", "/api/state"); if (view() === "admin") S.admin = await api("GET", "/api/admin"); if (view() === "connections") S.conn = await api("GET", "/api/connections"); render(); }
 async function load() {
   try { if (!S.meta) S.meta = await api("GET", "/api/meta"); await reload(); }
   catch (e) { if (e.status === 401) return; $("#root").innerHTML = `<div class="login"><h1>Could not load</h1><p class="err">${h(e.error)}</p><button class="btn" onclick="load()">Try again</button></div>`; }
@@ -556,7 +618,7 @@ function render() {
   if (!S.fid && !S.user.admin) { $("#root").innerHTML = `<div class="login"><div class="obrand">OmniSite</div><h1 style="margin-top:18px">No factory yet</h1><div class="sub">This login isn't linked to a factory yet. Ask OmniSite to add you.</div><div class="btns"><button class="btn ghost" type="button" onclick="logout()">Log out</button></div></div>`; return; }
   if (!S.fid && view() !== "admin") { location.hash = "#admin"; return; }
   $("#root").innerHTML = canEdit() || view() === "admin" ? manager() : owner();
-  document.title = `OmniSite · ${view() === "admin" ? "Factories" : canEdit() ? VIEWS[view()] : "Owner"}`;
+  document.title = `OmniSite · ${view() === "admin" ? "Factories" : view() === "connections" ? "Connections" : canEdit() ? VIEWS[view()] : "Owner"}`;
 }
 document.addEventListener("click", e => {
   if (e.target.closest(".toast")) return;
@@ -572,7 +634,7 @@ document.addEventListener("keydown", e => {
   if (o) { e.preventDefault(); openD(o.dataset.open); } else if (g) { e.preventDefault(); location.hash = g.dataset.go; }
 });
 $("#scrim").onclick = closeD; $("#dClose").onclick = closeD;
-window.addEventListener("hashchange", () => { closeD(); if (view() === "admin") loadAdmin().catch(e => toast(e.error)); else render(); window.scrollTo(0, 0); });
+window.addEventListener("hashchange", () => { closeD(); if (view() === "admin") loadAdmin().catch(e => toast(e.error)); else if (view() === "connections") loadConn().catch(e => toast(e.error)); else render(); window.scrollTo(0, 0); });
 setInterval(() => document.querySelectorAll("[data-since]").forEach(el => el.textContent = clock(nowMs() - new Date(el.dataset.since))), 1000);
 setInterval(() => { if (S.user && S.d && !S.key && !document.hidden) reload().catch(() => {}); }, 30000);
 (async () => { try { S.user = (await api("GET", "/api/me")).user; pickFactory(); } catch (e) { S.user = null; } S.user ? load() : render(); })();

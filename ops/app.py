@@ -352,14 +352,14 @@ def react(c, fid, sg, v, t):
         busy = c.execute("SELECT 1 FROM batches WHERE equipment_id=? AND status IN ('mixing','remix')", (e["id"],)).fetchone()
         open_stop = c.execute("SELECT * FROM stops WHERE equipment_id=? AND ended_at IS NULL", (e["id"],)).fetchone()
         if v > RUNNING_HZ:
-            if e["status"] != "running" or open_stop:
+            if e["status"] != "running" or open_stop or e["status_src"] != "sensor":
                 set_status(c, e, "running", None, at=t, src="sensor")
         elif busy and not open_stop:
             trip = c.execute("SELECT last_value FROM signals WHERE equipment_id=? AND metric='trip'", (e["id"],)).fetchone()
             code = int(trip["last_value"]) if trip and trip["last_value"] else 0
             set_status(c, e, "stopped", None, "Drive fault" if code else "", f"Trip code {code}" if code else "", at=t, src="sensor")
             log(c, fid, None, "stop", f"{e['name']} stopped during a batch (drive signal)")
-        elif not busy and not open_stop and e["status"] != "idle":
+        elif not busy and not open_stop and (e["status"] != "idle" or e["status_src"] != "sensor"):
             set_status(c, e, "idle", None, at=t, src="sensor")
     elif sg["metric"] == "trip" and v and v != sg["last_value"]:
         log(c, fid, None, "trip", f"{e['name']} drive trip code {int(v)}")
