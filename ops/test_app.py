@@ -142,5 +142,68 @@ class Journey(unittest.TestCase):
         self.assertEqual(call("GET", B + "/state", None, self.mb)[0], 404)  # removed person loses access
 
 
+def ingest(key, body):
+    raw = json.dumps(body).encode()
+    env = {"REQUEST_METHOD": "POST", "PATH_INFO": "/api/ingest", "CONTENT_LENGTH": str(len(raw)), "wsgi.input": io.BytesIO(raw),
+           "HTTP_X_GATEWAY_KEY": key, "wsgi.url_scheme": "http"}
+    out = {}
+    def start(status, headers):
+        out["status"] = int(status.split()[0])
+    data = json.loads(b"".join(app.application(env, start)))
+    return out["status"], data
+
+
+class Gateway(unittest.TestCase):
+    def test_gateway_journey(self):
+        with app.db() as c:
+            c.execute("INSERT OR IGNORE INTO users(email,name,is_admin,pw,created_at) VALUES(?,?,1,?,?)", ("g@omni.ae", "Admin G", app.hash_pw("correct horse 1"), app.now()))
+        a = login("g@omni.ae")
+        fid = call("POST", "/api/admin/factories", {"name": "Sensor F"}, a)[1]["id"]
+        call("POST", "/api/admin/people", {"factory_id": fid, "email": "sm@x.ae", "role": "manager", "name": "S", "password": "correct horse 1"}, a)
+        m = login("sm@x.ae")
+        F = f"/api/f/{fid}"
+        P = lambda path, body, who=a, code=200: self.assertEqual(call("POST", F + path, body, who)[0], code) or call("GET", F + "/state", None, who)[1]
+        P("/equipment", {"name": "Mixer 1", "kind": "mixer"}, m)
+        eid = call("GET", F + "/state", None, m)[1]["equipment"][0]["id"]
+        self.assertEqual(call("GET", F + "/connections", None, m)[0], 403)  # OmniSite team only
+        self.assertEqual(call("POST", F + "/gateways", {"name": "GW"}, m)[0], 403)
+        key = call("POST", F + "/gateways", {"name": "GW"}, a)[1]["key"]
+        for metric, tag, mult in (("speed_hz", "m1_hz", 0.01), ("trip", "m1_trip", 1), ("weigh_kg", "scale_kg", 1), ("temp_c", "m1_temp", 1), ("energy_kwh", "m1_wh", 0.001)):
+            P("/signals", {"equipment_id": eid, "metric": metric, "tag": tag, "mult": mult})
+        P("/signals", {"equipment_id": eid, "metric": "trip", "tag": "other"}, code=409)
+        sig = lambda: {s["metric"]: s for s in call("GET", F + "/state", None, m)[1]["signals"]}
+        self.assertEqual(ingest("wrong", {"m1_hz": 5000})[0], 401)
+        # no batch: drive stopped is idle, not a stop
+        s, d = ingest(key, {"m1_hz": 0, "nope": 1})
+        self.assertEqual((s, d["saved"], d["unknown_tags"]), (200, 1, ["nope"]))
+        st = call("GET", F + "/state", None, m)[1]
+        self.assertEqual((st["stops"], st["equipment"][0]["status"], st["equipment"][0]["status_src"]), ([], "idle", "sensor"))
+        P("/batches", {"equipment_id": eid}, m)
+        t0 = int(app.dt.datetime.now(app.dt.timezone.utc).timestamp()) + 1
+        s, d = ingest(key, {"readings": [{"tag": "m1_hz", "value": 5000, "at": t0}, {"tag": "scale_kg", "value": 400, "at": t0 + 1},
+                                         {"tag": "m1_temp", "value": 41.5, "at": t0 + 2}, {"tag": "m1_wh", "value": 1000, "at": t0 + 3}]})
+        self.assertEqual(d["saved"], 4)
+        self.assertEqual(ingest(key, {"readings": [{"tag": "scale_kg", "value": 400, "at": t0 + 1}]})[1]["saved"], 0)  # retry = no duplicate
+        self.assertEqual(sig()["speed_hz"]["last_value"], 50)
+        # Teltonika-style nested segment
+        ingest(key, {"input1": [{"name": "scale_kg", "data": "[150]", "date": t0 + 5}, {"name": "m1_wh", "data": [3500], "date": t0 + 6}]})
+        ingest(key, {"readings": [{"tag": "m1_trip", "value": 1, "at": t0 + 7}, {"tag": "m1_hz", "value": 0, "at": t0 + 8}]})
+        st = call("GET", F + "/state", None, m)[1]
+        stop = st["stops"][0]
+        self.assertEqual((stop["source"], stop["reason"], stop["note"], stop["ended_at"]), ("sensor", "Drive fault", "Trip code 1", None))
+        b = st["batches"][0]["s"]
+        self.assertEqual((b["kg"], b["weighings"], round(b["kwh"], 3), b["temp"]["last"]), (550, 2, 2.5, 41.5))
+        ingest(key, {"readings": [{"tag": "m1_hz", "value": 4800, "at": t0 + 200}]})
+        st = call("GET", F + "/state", None, m)[1]
+        self.assertTrue(st["stops"][0]["ended_at"]); self.assertEqual(st["equipment"][0]["status"], "running")
+        self.assertEqual(ingest(key, {"readings": [{"tag": "m1_hz", "value": 1, "at": t0 + 99999}]})[1]["refused"], 1)  # future time
+        self.assertTrue(st["gateways"][0]["last_seen"])
+        cn = call("GET", F + "/connections", None, a)[1]
+        self.assertNotIn("key_hash", cn["gateways"][0]); self.assertTrue(cn["readings"])
+        gid = cn["gateways"][0]["id"]
+        P(f"/gateways/{gid}/remove", {})
+        self.assertEqual(ingest(key, {"m1_hz": 1})[0], 401)  # removed key stops working
+
+
 if __name__ == "__main__":
     unittest.main()
