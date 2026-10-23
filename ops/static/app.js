@@ -119,6 +119,11 @@ function today() {
   const t = S.d.today, done = S.d.batches.filter(b => b.status === "moved" && dayOf(b.moved_at) === t);
   return {done: done.length, target: setn("target_batches"), litres: setn("batch_litres"), started: S.d.batches.filter(b => b.day === t).length};
 }
+function dayMins(s, day) {  // minutes of stop s that fall on this UAE day
+  const ds = new Date(day + "T00:00:00+04:00").getTime(), de = ds + 864e5;
+  const st = Math.max(new Date(s.started_at).getTime(), ds), en = Math.min(s.ended_at ? new Date(s.ended_at).getTime() : Date.now(), de);
+  return Math.max(0, Math.round((en - st) / 6e4));
+}
 function week() {
   const days = lastDays(7), set = new Set(days);
   const fin = S.d.batches.filter(b => set.has(finishedDay(b)));
@@ -133,8 +138,7 @@ function week() {
   stops.forEach(s => { const k = s.reason || "Reason not entered"; reasons[k] = (reasons[k] || 0) + sm(s); });
   const causes = {};
   S.d.qc.filter(q => q.result === "remix" && set.has(dayOf(q.at))).forEach(q => { const k = `${q.cause_what} ${q.cause_dir.toLowerCase()}`; causes[k] = (causes[k] || 0) + 1; });
-  const perDay = days.map(day => { const ds = new Date(day + "T00:00:00+04:00").getTime(), de = ds + 864e5;
-    return {day, m: stops.reduce((a, s) => { const st = Math.max(new Date(s.started_at).getTime(), ds), en = Math.min(s.ended_at ? new Date(s.ended_at).getTime() : Date.now(), de); return a + Math.max(0, Math.round((en - st) / 6e4)); }, 0)}; });
+  const perDay = days.map(day => ({day, m: stops.reduce((a, s) => a + dayMins(s, day), 0)}));
   const losses = S.d.losses.filter(l => set.has(l.day)), lossKg = losses.reduce((a, l) => a + l.kg, 0);
   const lab = S.d.labour.filter(l => set.has(l.day)), labH = lab.reduce((a, l) => a + l.hours, 0);
   const n = [0, 0, 0]; fin.forEach(b => n[cls(b)]++);
@@ -434,7 +438,7 @@ function drawer(k) {
     return {icon: ic(e.kind, s.st, {spin: s.spin}), kicker: S.meta.kinds[e.kind], title: e.name, body};
   }
   if (kind === "day") {
-    const day = id, list = S.d.stops.filter(s => dayOf(s.started_at) === day), tot = list.reduce((a, s) => a + minsBetween(s.started_at, s.ended_at), 0);
+    const day = id, list = S.d.stops.filter(s => dayOf(s.started_at) === day || dayMins(s, day) > 0), tot = list.reduce((a, s) => a + dayMins(s, day), 0);
     let body = `<div class="big">${mins(tot)} <small>stopped</small></div>` + (list.length ? `<h4>Stops</h4>` + rows(list.map(s => [`${h(eq(s.equipment_id).name)} · ${hm(s.started_at)}${s.ended_at ? `–${hm(s.ended_at)}` : " · still stopped"}`, s.reason ? h(s.reason) : `<span class="st"><span class="dot r"></span>Reason needed</span>`, manual(mins(minsBetween(s.started_at, s.ended_at))), ic(eq(s.equipment_id).kind, s.ended_at ? null : "r", {size: "sm"}), `stop:${s.id}`])) : empty("No stops recorded on this day."));
     let after;
     if (!ro && S.d.equipment.length) { body += stopForm("fPast", `Add a stop on ${day === S.d.today ? "today" : dm(day)}`); after = () => bindStop("fPast", day); }
