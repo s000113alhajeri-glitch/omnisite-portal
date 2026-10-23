@@ -32,13 +32,14 @@ function switchF(id) { S.fid = Number(id); localStorage.setItem("omni_fid", S.fi
 const switcher = () => (S.user.factories || []).length > 1 ? `<select class="inp fsel" aria-label="Factory" onchange="switchF(this.value)">${S.user.factories.map(f => `<option value="${f.id}" ${f.id === S.fid ? "selected" : ""}>${h(f.name)}</option>`).join("")}</select>` : "";
 const $ = s => document.querySelector(s);
 const h = v => String(v ?? "").replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+const BASE = location.pathname.replace(/\/[^/]*$/, "");  // "" at /, "/ops" when mounted under /ops/
 const GLOBAL = /^\/api\/(login|logout|me|meta|admin)(\/|$)/;
 async function api(method, path, body) {
   if (!GLOBAL.test(path)) path = `/api/f/${S.fid}` + path.slice(4);
   const opt = {method, headers: {}, credentials: "same-origin"};
   if (body !== undefined) { opt.body = JSON.stringify(body); opt.headers["Content-Type"] = "application/json"; }
   let r;
-  try { r = await fetch(path, opt); } catch (e) { throw {status: 0, error: "No internet connection. Nothing was saved. Please try again."}; }
+  try { r = await fetch(BASE + path, opt); } catch (e) { throw {status: 0, error: "No internet connection. Nothing was saved. Please try again."}; }
   let d = {};
   try { d = await r.json(); } catch (e) {}
   if (r.status === 401 && path !== "/api/login") { S.user = null; closeD(); render(); }
